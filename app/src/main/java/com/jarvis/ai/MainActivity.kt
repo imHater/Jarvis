@@ -130,7 +130,11 @@ fun JarvisApp(vm: JarvisViewModel) {
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Orb(vm.state)
+                AnimatedOrb(
+    state = vm.state,
+    level = vm.level,
+    modifier = Modifier.width(52.dp)
+)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(

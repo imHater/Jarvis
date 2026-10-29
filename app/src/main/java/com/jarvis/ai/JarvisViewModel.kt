@@ -124,7 +124,13 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         state = JarvisState.IDLE
         if (conversationActive) listenNow()
     }
-
+    /** Clears the on-screen conversation (saved history is kept). */
+    fun newChat() {
+        stopAll()
+        pendingConfirm = null
+        heardText = ""
+        messages.clear()
+    }
     fun showNotice(text: String) {
         messages.add(ChatMessage("⚠️ $text", false))
     }

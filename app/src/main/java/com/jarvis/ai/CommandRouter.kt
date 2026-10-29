@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
-import android.net.Uri
 import android.provider.AlarmClock
 import android.provider.Settings
 import java.text.SimpleDateFormat
@@ -15,8 +14,13 @@ import java.util.Locale
 sealed class CommandResult {
     object NotACommand : CommandResult()
     data class Reply(val text: String) : CommandResult()
-    /** Needs the user's YES before anything happens. onYes returns the reply to show. */
-    data class Confirm(val prompt: String, val onYes: () -> String) : CommandResult()
+
+    /** Needs the user's YES first. Permissions (if any) are requested after the yes. */
+    data class Confirm(
+        val prompt: String,
+        val permissions: List<String> = emptyList(),
+        val onYes: () -> String
+    ) : CommandResult()
 }
 
 /** Simple phone commands that work without internet and without AI. */
@@ -24,6 +28,8 @@ class CommandRouter(
     private val context: Context,
     private val memory: MemoryStore
 ) {
+    private val phone = PhoneActions(context)
+
     fun handle(input: String): CommandResult {
         val original = input.trim()
         val t = original.lowercase(Locale.getDefault())
@@ -55,7 +61,7 @@ class CommandRouter(
         }
 
         // Flashlight
-        if (words.any { it == "torch" || it == "flashlight" || it == "flash" || it == "torch" }) {
+        if (words.any { it == "torch" || it == "flashlight" || it == "flash" }) {
             val off = words.any { it in setOf("off", "band", "bujha", "bujhao", "stop") }
             val on = words.any { it in setOf("on", "chalu", "jalao", "jala", "start") }
             return when {
@@ -69,22 +75,17 @@ class CommandRouter(
         if (words.any { it == "alarm" || it == "reminder" }) {
             val ok = launch(Intent(AlarmClock.ACTION_SHOW_ALARMS))
             return CommandResult.Reply(
-                if (ok) "Opening your clock app. Tap + to add an alarm. I can't set alarms silently yet."
+                if (ok) "Opening your clock app. Tap + to add an alarm."
                 else "I couldn't open the clock app. Please open it manually."
             )
         }
 
-        // Dialer (needs confirmation, never calls by itself)
-        if (words.any { it == "call" || it == "dial" }) {
-            val m = Regex("\\+?\\d[\\d\\s-]{5,}\\d").find(t)
-            if (m == null) {
-                return CommandResult.Reply("Tell me the number too, like: call 98XXXXXXXX. I cannot read your contacts.")
-            }
-            val number = m.value.replace(Regex("[\\s-]"), "")
-            return CommandResult.Confirm("Open the dialer with $number? You will still press the call button yourself.") {
-                val ok = launch(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$number")))
-                if (ok) "Dialer opened." else "I couldn't open the dialer."
-            }
+        // Calls: always asks first. Names are looked up in your contacts.
+        val callTarget = Regex("^(?:call|dial|phone)\\s+(.+)$").find(t)?.groupValues?.get(1)
+            ?: Regex("^(.+?)\\s+ko\\s+(?:call|phone|fone)(?:\\s+(?:karo|kar do|kar|lagao|laga do|lagana))?$")
+                .find(t)?.groupValues?.get(1)
+        if (callTarget != null) {
+            return phone.callConfirm(callTarget.removePrefix("to ").trim())
         }
 
         // Open apps / settings
@@ -141,8 +142,9 @@ class CommandRouter(
 
     companion object {
         const val HELP = "I can: open apps (\"open youtube\" / \"youtube kholo\"), open settings, " +
-            "torch on/off, tell time and date, open the dialer (\"call 98XXXXXXXX\"), " +
-            "open the clock app (\"alarm\"), and save notes (\"remember ...\" / \"yaad rakho ...\"). " +
-            "For everything else I use online AI, which needs internet."
+            "torch on/off, tell time and date, call a contact (\"call ammi\" / \"ammi ko call karo\"), " +
+            "send an SMS (\"ammi ko sms bhejo ki main late aaunga\"), open the clock app (\"alarm\"), " +
+            "and save notes (\"remember ...\" / \"yaad rakho ...\"). " +
+            "For everything else I use online AI, which needs internet. I always ask before calling or sending."
     }
 }

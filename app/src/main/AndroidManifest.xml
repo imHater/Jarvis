@@ -16,6 +16,7 @@
 
     <application
         android:allowBackup="false"
+        android:icon="@drawable/ic_launcher"
         android:label="JARVIS AI"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
         <activity

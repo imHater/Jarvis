@@ -172,6 +172,16 @@ fun JarvisApp(vm: JarvisViewModel) {
         else vm.showNotice("Microphone permission was denied. You can still type to me.")
     }
 
+    // Permissions for calls / SMS / contacts, asked only after you say yes.
+    val permLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { vm.permissionsResult() }
+    LaunchedEffect(vm.permissionRequest) {
+        if (vm.permissionRequest.isNotEmpty()) {
+            permLauncher.launch(vm.permissionRequest.toTypedArray())
+        }
+    }
+
     fun onMicClick() {
         if (vm.state == JarvisState.LISTENING || vm.state == JarvisState.SPEAKING) {
             vm.stopAll()
@@ -322,7 +332,9 @@ fun JarvisApp(vm: JarvisViewModel) {
                         // ---------- VOICE MODE (orb only) ----------
                         val last = vm.messages.lastOrNull()
                         val warn = last != null && last.text.startsWith("⚠") && vm.state == JarvisState.IDLE
-                        val caption = last?.takeIf { !it.fromUser && (warn || !vm.speakReplies) }
+                        val caption = last?.takeIf {
+                            !it.fromUser && (warn || !vm.speakReplies || vm.pendingConfirm != null)
+                        }
 
                         Column(
                             Modifier.weight(1f).fillMaxWidth(),
@@ -363,11 +375,25 @@ fun JarvisApp(vm: JarvisViewModel) {
                                     if (caption != null) {
                                         Text(
                                             caption.text,
-                                            color = if (warn) Amber else Dim,
+                                            color = if (warn) Amber else if (vm.pendingConfirm != null) Color.White else Dim,
                                             fontSize = 13.sp, textAlign = TextAlign.Center, maxLines = 4,
                                             modifier = Modifier.padding(horizontal = 24.dp, vertical = 6.dp)
                                         )
                                     }
+                                }
+                            }
+                        }
+
+                        if (vm.pendingConfirm != null) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Button(onClick = { vm.resolveConfirm(true) }, modifier = Modifier.weight(1f)) {
+                                    Text("Yes")
+                                }
+                                OutlinedButton(onClick = { vm.resolveConfirm(false) }, modifier = Modifier.weight(1f)) {
+                                    Text("No")
                                 }
                             }
                         }
@@ -805,6 +831,8 @@ fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (Stri
                         "personality text and your saved notes, but only for questions that are " +
                         "not local commands.\n" +
                         "Sent to Inworld (only if you set it up): the text of replies, to make the voice.\n" +
+                        "Calls and SMS: only after you say yes. Contacts are searched on the phone " +
+                        "for the name you say; the contact list is never sent anywhere.\n" +
                         "Local commands (open app, torch, time, dialer) never go online.\n" +
                         "Voice recognition is done by your phone's speech service and may use " +
                         "internet. On the free tier Google may use data to improve its products, " +
@@ -818,7 +846,7 @@ fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (Stri
                 vm.settings.userName = userNameField
                 vm.settings.inworldKey = inKey
                 vm.settings.inworldVoiceId = inVoice
-                vm.settings.inworldModel = inModel.ifBlank { "inworld-tts-1.5-max" }
+                vm.settings.inworldModel = inModel.ifBlank { "inworld-tts-2" }
                 onUserName(userNameField.trim())
                 vm.saveSettings(key, model, name, personality, lang, speak, hands, speed)
                 onDismiss()

@@ -534,6 +534,30 @@ fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (Stri
                     )
                 }
                 Spacer(Modifier.height(8.dp))
+                                Text("Inworld voice (optional)")
+                OutlinedTextField(
+                    value = inKey, onValueChange = { inKey = it },
+                    label = { Text("Inworld API key") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true, modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = inVoice, onValueChange = { inVoice = it },
+                    label = { Text("Inworld voice ID") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = inModel, onValueChange = { inModel = it },
+                    label = { Text("Inworld model name") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    "If key and voice ID are filled, each spoken reply's text is sent to " +
+                        "Inworld to make the voice. Leave them empty to use the phone's own " +
+                        "voice. Speaking speed applies to the phone voice only.",
+                    fontSize = 11.sp
+                )
+                Spacer(Modifier.height(8.dp))
                 Text("Speaking speed")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
@@ -581,6 +605,9 @@ fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (Stri
         confirmButton = {
             TextButton(onClick = {
                 vm.settings.userName = userNameField
+                                vm.settings.inworldKey = inKey
+                vm.settings.inworldVoiceId = inVoice
+                vm.settings.inworldModel = inModel.ifBlank { "inworld-tts-1.5-max" }
                 onUserName(userNameField.trim())
                 vm.saveSettings(key, model, name, personality, lang, speak, hands, speed)
                 onDismiss()

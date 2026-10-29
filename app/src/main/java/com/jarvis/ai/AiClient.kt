@@ -88,6 +88,15 @@ class AiClient(private val settings: SecureSettings) {
         system.append("Reply in the same language the user uses (Hindi, Hinglish or English). ")
         system.append("Keep answers short (1 to 3 sentences unless asked for more) because they are spoken aloud. Do not use markdown symbols. ")
         system.append("You cannot control the phone directly; never claim you performed phone actions. ")
+                system.append(
+            "You cannot control the phone yourself. If the user clearly asks you to call someone, " +
+                "reply with ONLY this one line and nothing else: [[CALL|name or number]]. " +
+                "If the user clearly asks you to send an SMS or text message, reply with ONLY this one line: " +
+                "[[SMS|name or number|message text]], writing the message text in the user's own style and language. " +
+                "Write the contact name in English letters. " +
+                "The app will ask the user to confirm before anything happens. " +
+                "Never claim you performed any phone action. "
+        )
         if (memories.isNotEmpty()) {
             system.append("Notes the user approved you to remember: ")
             memories.forEach { system.append("- ${it.text} ") }

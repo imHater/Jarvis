@@ -479,7 +479,9 @@ fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (Stri
     var speak by remember { mutableStateOf(vm.speakReplies) }
     var hands by remember { mutableStateOf(vm.handsFree) }
     var speed by remember { mutableStateOf(vm.speechSpeed) }
-
+    var inKey by remember { mutableStateOf(vm.settings.inworldKey) }
+    var inVoice by remember { mutableStateOf(vm.settings.inworldVoiceId) }
+    var inModel by remember { mutableStateOf(vm.settings.inworldModel) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Settings") },

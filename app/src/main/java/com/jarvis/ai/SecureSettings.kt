@@ -23,7 +23,9 @@ class SecureSettings(context: Context) {
         // Fallback: still private to this app
         context.getSharedPreferences("jarvis_private", Context.MODE_PRIVATE)
     }
-
+    var userName: String
+        get() = prefs.getString("user_name", "") ?: ""
+        set(v) = prefs.edit().putString("user_name", v.trim()).apply()
     var apiKey: String
         get() = prefs.getString("api_key", "") ?: ""
         set(v) = prefs.edit().putString("api_key", v.trim()).apply()

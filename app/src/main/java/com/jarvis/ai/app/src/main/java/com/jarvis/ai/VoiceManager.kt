@@ -2,6 +2,8 @@ package com.jarvis.ai
 
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.MediaPlayer
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -10,18 +12,32 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.util.Base64
+import org.json.JSONObject
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.UnknownHostException
 import java.util.Locale
 
-/** Listening (speech to text) and speaking (text to speech), using Android's built-in services. */
+/**
+ * Listening (speech to text) and speaking.
+ * Speaking uses your Inworld cloned voice if key + voice ID are set in Settings,
+ * otherwise (or if Inworld fails) the phone's own text-to-speech.
+ */
 class VoiceManager(
     private val context: Context,
     private val onSpeakingDone: () -> Unit,
-    private val onLevel: (Float) -> Unit
+    private val onLevel: (Float) -> Unit,
+    private val onNotice: (String) -> Unit = {}
 ) {
     private val main = Handler(Looper.getMainLooper())
+    private val settings = SecureSettings(context)
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var recognizer: SpeechRecognizer? = null
+    private var player: MediaPlayer? = null
+    private var speakToken = 0
 
     var speechRate: Float = 1.0f
 
@@ -35,11 +51,120 @@ class VoiceManager(
 
     /** Returns false if nothing could be spoken. */
     fun speak(text: String): Boolean {
+        val spoken = clean(text).take(1900)
+        if (spoken.isBlank()) return false
+        stopSpeaking()
+
+        val key = settings.inworldKey
+        val voiceId = settings.inworldVoiceId
+        if (key.isNotBlank() && voiceId.isNotBlank()) {
+            speakInworld(spoken, key, voiceId)
+            return true
+        }
+        return speakDevice(spoken)
+    }
+
+    // ---------- Inworld (cloned voice) ----------
+
+    private fun speakInworld(text: String, key: String, voiceId: String) {
+        val token = ++speakToken
+        val model = settings.inworldModel.ifBlank { "inworld-tts-1.5-max" }
+
+        Thread {
+            var audio: ByteArray? = null
+            var error: String? = null
+            try {
+                val conn = URL("https://api.inworld.ai/tts/v1/voice").openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.connectTimeout = 15000
+                conn.readTimeout = 40000
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.setRequestProperty("Authorization", "Basic " + key.removePrefix("Basic ").trim())
+
+                val body = JSONObject()
+                    .put("text", text)
+                    .put("voiceId", voiceId)
+                    .put("modelId", model)
+                    .put("audioConfig", JSONObject().put("audioEncoding", "MP3"))
+                    .toString()
+                conn.outputStream.use { it.write(body.toByteArray()) }
+
+                val code = conn.responseCode
+                if (code == 200) {
+                    val json = conn.inputStream.bufferedReader().use { it.readText() }
+                    val obj = JSONObject(json)
+                    var b64 = obj.optString("audioContent")
+                    if (b64.isBlank()) {
+                        b64 = obj.optJSONObject("result")?.optString("audioContent") ?: ""
+                    }
+                    if (b64.isBlank()) error = "Inworld sent no audio."
+                    else audio = Base64.decode(b64, Base64.DEFAULT)
+                } else {
+                    val detail = try {
+                        conn.errorStream?.bufferedReader()?.use { it.readText() }?.take(160) ?: ""
+                    } catch (e: Exception) { "" }
+                    error = when (code) {
+                        401, 403 -> "Inworld key not accepted ($code). Check the key in Settings."
+                        429 -> "Inworld limit reached (429)."
+                        else -> "Inworld error ($code). Check voice ID and model name. $detail"
+                    }
+                }
+            } catch (e: UnknownHostException) {
+                error = "No internet for Inworld voice."
+            } catch (e: Exception) {
+                error = "Inworld voice failed: ${e.message}"
+            }
+            main.post { onInworldResult(token, text, audio, error) }
+        }.start()
+    }
+
+    private fun onInworldResult(token: Int, text: String, audio: ByteArray?, error: String?) {
+        if (token != speakToken) return // cancelled meanwhile
+        if (audio == null) {
+            fallbackToDevice(text, error ?: "Inworld voice failed.")
+            return
+        }
+        try {
+            val f = File(context.cacheDir, "kabir_voice.mp3")
+            f.writeBytes(audio)
+            val mp = MediaPlayer()
+            player = mp
+            mp.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .build()
+            )
+            mp.setDataSource(f.absolutePath)
+            mp.setOnPreparedListener { it.start() }
+            mp.setOnCompletionListener {
+                try { it.release() } catch (e: Exception) {}
+                if (player === it) player = null
+                if (token == speakToken) onSpeakingDone()
+            }
+            mp.setOnErrorListener { p, _, _ ->
+                try { p.release() } catch (e: Exception) {}
+                if (player === p) player = null
+                if (token == speakToken) fallbackToDevice(text, "Could not play the Inworld audio.")
+                true
+            }
+            mp.prepareAsync()
+        } catch (e: Exception) {
+            fallbackToDevice(text, "Could not play the Inworld audio.")
+        }
+    }
+
+    private fun fallbackToDevice(text: String, reason: String) {
+        onNotice("$reason Using the phone voice instead.")
+        if (!speakDevice(text)) onSpeakingDone()
+    }
+
+    // ---------- Phone voice ----------
+
+    private fun speakDevice(spoken: String): Boolean {
         val engine = tts
         if (engine == null || !ttsReady) return false
-
-        val spoken = clean(text).take(3500)
-        if (spoken.isBlank()) return false
 
         val hasHindi = spoken.any { it in '\u0900'..'\u097F' }
         val locale = if (hasHindi) Locale("hi", "IN") else Locale("en", "IN")
@@ -55,7 +180,7 @@ class VoiceManager(
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) { main.post { onSpeakingDone() } }
         })
-        val r = engine.speak(spoken, TextToSpeech.QUEUE_FLUSH, null, "jarvis")
+        val r = engine.speak(spoken.take(3500), TextToSpeech.QUEUE_FLUSH, null, "jarvis")
         return r == TextToSpeech.SUCCESS
     }
 
@@ -67,8 +192,13 @@ class VoiceManager(
             .trim()
 
     fun stopSpeaking() {
+        speakToken++
         tts?.stop()
+        try { player?.release() } catch (e: Exception) {}
+        player = null
     }
+
+    // ---------- Listening ----------
 
     /** languageTag example: "hi-IN" or "en-IN". Call only after mic permission is granted. */
     fun startListening(
@@ -141,7 +271,7 @@ class VoiceManager(
 
     fun shutdown() {
         stopListening()
-        tts?.stop()
+        stopSpeaking()
         tts?.shutdown()
         tts = null
     }

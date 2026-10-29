@@ -19,6 +19,15 @@ sealed class AiResult {
 /** Talks to Google Gemini. Your API key is sent only to Google. */
 class AiClient(private val settings: SecureSettings) {
 
+    private sealed class Raw {
+        data class Ok(val json: String) : Raw()
+        data class Http(val code: Int) : Raw()
+        data class Err(val message: String) : Raw()
+    }
+
+    // Some models reject the "no thinking" setting. If so, we remember and stop trying it.
+    @Volatile private var fastOk = true
+
     suspend fun ask(history: List<ChatMessage>, memories: List<MemoryItem>): AiResult =
         withContext(Dispatchers.IO) {
             val key = settings.apiKey
@@ -27,44 +36,57 @@ class AiClient(private val settings: SecureSettings) {
                     "API key not set. Open Settings and paste your Gemini key."
                 )
             }
-            try {
-                val url = URL(
-                    "https://generativelanguage.googleapis.com/v1beta/models/" +
-                        "${settings.model}:generateContent"
-                )
-                val conn = url.openConnection() as HttpURLConnection
-                conn.requestMethod = "POST"
-                conn.connectTimeout = 15000
-                conn.readTimeout = 30000
-                conn.doOutput = true
-                conn.setRequestProperty("Content-Type", "application/json")
-                conn.setRequestProperty("x-goog-api-key", key)
+            val useFast = fastOk
+            val first = post(key, buildBody(history, memories, useFast))
+            val raw = if (useFast && first is Raw.Http && first.code == 400) {
+                fastOk = false
+                post(key, buildBody(history, memories, false))
+            } else first
 
-                conn.outputStream.use { it.write(buildBody(history, memories).toByteArray()) }
-
-                val code = conn.responseCode
-                if (code == 200) {
-                    val text = conn.inputStream.bufferedReader().use { it.readText() }
-                    parse(text)
-                } else {
-                    conn.errorStream?.close()
-                    AiResult.Failure(errorFor(code))
-                }
-            } catch (e: UnknownHostException) {
-                AiResult.Failure("No internet connection. Offline commands still work.")
-            } catch (e: SocketTimeoutException) {
-                AiResult.Failure("The AI took too long to answer. Please try again.")
-            } catch (e: Exception) {
-                AiResult.Failure("Something went wrong: ${e.message}")
+            when (raw) {
+                is Raw.Ok -> parse(raw.json)
+                is Raw.Http -> AiResult.Failure(errorFor(raw.code))
+                is Raw.Err -> AiResult.Failure(raw.message)
             }
         }
 
-    private fun buildBody(history: List<ChatMessage>, memories: List<MemoryItem>): String {
+    private fun post(key: String, body: String): Raw {
+        return try {
+            val url = URL(
+                "https://generativelanguage.googleapis.com/v1beta/models/" +
+                    "${settings.model}:generateContent"
+            )
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 15000
+            conn.readTimeout = 30000
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("x-goog-api-key", key)
+            conn.outputStream.use { it.write(body.toByteArray()) }
+
+            val code = conn.responseCode
+            if (code == 200) {
+                Raw.Ok(conn.inputStream.bufferedReader().use { it.readText() })
+            } else {
+                conn.errorStream?.close()
+                Raw.Http(code)
+            }
+        } catch (e: UnknownHostException) {
+            Raw.Err("No internet connection. Offline commands still work.")
+        } catch (e: SocketTimeoutException) {
+            Raw.Err("The AI took too long to answer. Please try again.")
+        } catch (e: Exception) {
+            Raw.Err("Something went wrong: ${e.message}")
+        }
+    }
+
+    private fun buildBody(history: List<ChatMessage>, memories: List<MemoryItem>, fast: Boolean): String {
         val system = StringBuilder()
         system.append("You are ${settings.assistantName}, a personal voice assistant. ")
         system.append("Personality: ${settings.personality} ")
         system.append("Reply in the same language the user uses (Hindi, Hinglish or English). ")
-        system.append("Keep answers short because they are spoken aloud. Do not use markdown symbols. ")
+        system.append("Keep answers short (1 to 3 sentences unless asked for more) because they are spoken aloud. Do not use markdown symbols. ")
         system.append("You cannot control the phone directly; never claim you performed phone actions. ")
         if (memories.isNotEmpty()) {
             system.append("Notes the user approved you to remember: ")
@@ -72,20 +94,29 @@ class AiClient(private val settings: SecureSettings) {
         }
 
         val contents = JSONArray()
-        history.takeLast(20).forEach {
+        history.takeLast(16).forEach {
             contents.put(
                 JSONObject()
                     .put("role", if (it.fromUser) "user" else "model")
                     .put("parts", JSONArray().put(JSONObject().put("text", it.text)))
             )
         }
-        return JSONObject()
+        val body = JSONObject()
             .put(
                 "systemInstruction",
                 JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system.toString())))
             )
             .put("contents", contents)
-            .toString()
+
+        if (fast) {
+            body.put(
+                "generationConfig",
+                JSONObject()
+                    .put("maxOutputTokens", 500)
+                    .put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+            )
+        }
+        return body.toString()
     }
 
     private fun parse(json: String): AiResult {

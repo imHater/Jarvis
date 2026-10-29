@@ -68,7 +68,8 @@ class VoiceManager(
 
     private fun speakInworld(text: String, key: String, voiceId: String) {
         val token = ++speakToken
-        val model = settings.inworldModel.ifBlank { "inworld-tts-1.5-max" }
+        val model = settings.inworldModel.ifBlank { "inworld-tts-2" }
+        val hasHindi = text.any { it in '\u0900'..'\u097F' }
 
         Thread {
             var audio: ByteArray? = null
@@ -82,13 +83,13 @@ class VoiceManager(
                 conn.setRequestProperty("Content-Type", "application/json")
                 conn.setRequestProperty("Authorization", "Basic " + key.removePrefix("Basic ").trim())
 
-                val body = JSONObject()
+                val bodyJson = JSONObject()
                     .put("text", text)
                     .put("voiceId", voiceId)
                     .put("modelId", model)
                     .put("audioConfig", JSONObject().put("audioEncoding", "MP3"))
-                    .toString()
-                conn.outputStream.use { it.write(body.toByteArray()) }
+                if (hasHindi) bodyJson.put("language", "hi")
+                conn.outputStream.use { it.write(bodyJson.toString().toByteArray()) }
 
                 val code = conn.responseCode
                 if (code == 200) {

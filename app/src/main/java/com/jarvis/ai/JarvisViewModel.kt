@@ -19,6 +19,7 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
     private val memoryStore = MemoryStore(app)
     private val ai = AiClient(settings)
     private val router = CommandRouter(app, memoryStore)
+    private val phone = PhoneActions(app)
     private val uiPrefs = app.getSharedPreferences("jarvis_ui", 0)
 
     val messages = mutableStateListOf<ChatMessage>()
@@ -44,13 +45,19 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
     var heardText by mutableStateOf("")
         private set
 
+    /** Permissions the screen should ask for (after you said yes to a call/SMS). */
+    var permissionRequest by mutableStateOf<List<String>>(emptyList())
+        private set
+
+    private var afterPermission: (() -> String)? = null
+    private var askedPerms: List<String> = emptyList()
     private var conversationActive = false
     private var silentRetries = 0
 
     private val voice = VoiceManager(
         app,
         onSpeakingDone = { onSpeechFinished() },
-                onLevel = { level = it },
+        onLevel = { level = it },
         onNotice = { showNotice(it) }
     )
 
@@ -85,13 +92,37 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
     fun resolveConfirm(yes: Boolean) {
         val p = pendingConfirm ?: return
         pendingConfirm = null
-        if (yes) {
-            val out = p.onYes()
-            memories = memoryStore.getAll()
-            reply(out)
-        } else {
+        if (!yes) {
             reply("Okay, cancelled.")
+            return
         }
+        val missing = p.permissions.filter { !phone.has(it) }
+        if (missing.isNotEmpty()) {
+            afterPermission = p.onYes
+            askedPerms = missing
+            permissionRequest = missing
+            return
+        }
+        runConfirmed(p.onYes)
+    }
+
+    /** Called by the screen after the permission dialog closes. */
+    fun permissionsResult() {
+        permissionRequest = emptyList()
+        val action = afterPermission
+        afterPermission = null
+        if (action == null) return
+        if (askedPerms.all { phone.has(it) }) {
+            runConfirmed(action)
+        } else {
+            reply("I need that permission to do this, so I did not do it. You can allow it in the phone's app settings.")
+        }
+    }
+
+    private fun runConfirmed(action: () -> String) {
+        val out = action()
+        memories = memoryStore.getAll()
+        reply(out)
     }
 
     private fun askAi() {
@@ -99,7 +130,15 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val history = messages.filter { !it.text.startsWith("⚠") }
             when (val result = ai.ask(history, memoryStore.getAll())) {
-                is AiResult.Success -> reply(result.text)
+                is AiResult.Success -> {
+                    val c = phone.fromAiText(result.text)
+                    if (c != null) {
+                        pendingConfirm = c
+                        reply(c.prompt)
+                    } else {
+                        reply(result.text)
+                    }
+                }
                 is AiResult.Failure -> {
                     conversationActive = false
                     messages.add(ChatMessage("⚠️ ${result.message}", false))
@@ -124,6 +163,7 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         state = JarvisState.IDLE
         if (conversationActive) listenNow()
     }
+
     /** Clears the on-screen conversation (saved history is kept). */
     fun newChat() {
         stopAll()
@@ -131,6 +171,7 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         heardText = ""
         messages.clear()
     }
+
     fun showNotice(text: String) {
         messages.add(ChatMessage("⚠️ $text", false))
     }
@@ -236,10 +277,12 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
     private companion object {
         val YES_WORDS = setOf(
             "yes", "yeah", "yep", "ok", "okay", "sure",
-            "haan", "han", "ha", "haa", "kar do", "theek hai", "thik hai"
+            "haan", "han", "ha", "haa", "kar do", "theek hai", "thik hai",
+            "हाँ", "हां", "हा", "जी", "ठीक है", "कर दो"
         )
         val NO_WORDS = setOf(
-            "no", "nope", "nahi", "nahin", "na", "cancel", "mat karo", "ruko", "stop"
+            "no", "nope", "nahi", "nahin", "na", "cancel", "mat karo", "ruko", "stop",
+            "नहीं", "ना", "रुको", "मत करो"
         )
     }
 }

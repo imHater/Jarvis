@@ -50,7 +50,8 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
     private val voice = VoiceManager(
         app,
         onSpeakingDone = { onSpeechFinished() },
-        onLevel = { level = it }
+                onLevel = { level = it },
+        onNotice = { showNotice(it) }
     )
 
     init {

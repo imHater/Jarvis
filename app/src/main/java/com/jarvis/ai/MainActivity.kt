@@ -41,39 +41,47 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
@@ -83,15 +91,17 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import kotlin.math.PI
 import kotlin.math.sin
+import kotlinx.coroutines.launch
 
 private val Bg = Color(0xFF02040A)
 private val Panel = Color(0xFF0C1626)
 private val Cyan = Color(0xFF00E5FF)
 private val Dim = Color(0xFF8A9BB5)
-private val Green = Color(0xFF3DDC84)
 private val Amber = Color(0xFFFFB300)
 private val Purple = Color(0xFF7C4DFF)
 private val Blue = Color(0xFF2979FF)
+private val Edge = Color(0xFF2F6BFF)
+private val BtnGrad = listOf(Color(0xFF0A2A66), Color(0xFF0B3C94))
 
 class MainActivity : ComponentActivity() {
     private val vm: JarvisViewModel by viewModels()
@@ -132,10 +142,28 @@ private fun stateLabel(s: JarvisState): String = when (s) {
 @Composable
 fun JarvisApp(vm: JarvisViewModel) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    val chatStore = remember { ChatStore(context) }
+
     var showSettings by remember { mutableStateOf(false) }
     var showMemory by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
+    var textMode by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     var userName by remember { mutableStateOf(vm.settings.userName) }
+    var saved by remember { mutableStateOf(vm.messages.size) }
+
+    // Save finished messages to local history (warnings are not saved).
+    LaunchedEffect(vm.messages.size) {
+        val n = vm.messages.size
+        if (n < saved) saved = n
+        while (saved < n) {
+            val m = vm.messages[saved]
+            if (!m.text.startsWith("⚠")) chatStore.add(m)
+            saved++
+        }
+    }
 
     val micLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -150,6 +178,7 @@ fun JarvisApp(vm: JarvisViewModel) {
             return
         }
         if (vm.state == JarvisState.THINKING) return
+        textMode = false
         val has = ContextCompat.checkSelfPermission(
             context, Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
@@ -163,117 +192,192 @@ fun JarvisApp(vm: JarvisViewModel) {
         }
     }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = Bg, contentColor = Color.White) {
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color(0xFF01030A), Color(0xFF020712), Color(0xFF05163D))
-                    )
+    fun goTyping() {
+        vm.stopAll()
+        textMode = true
+    }
+
+    fun closeDrawer() {
+        scope.launch { drawerState.close() }
+    }
+
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ModalDrawerSheet(drawerContainerColor = Panel) {
+                Text(
+                    vm.assistantName.uppercase(),
+                    color = Cyan, fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold, letterSpacing = 5.sp,
+                    modifier = Modifier.padding(start = 24.dp, top = 32.dp, bottom = 16.dp)
                 )
-        ) {
-            Column(
+                DrawerEntry("New chat") {
+                    vm.newChat()
+                    textMode = false
+                    closeDrawer()
+                }
+                DrawerEntry("Chat history") {
+                    showHistory = true
+                    closeDrawer()
+                }
+                DrawerEntry("Notes") {
+                    showMemory = true
+                    closeDrawer()
+                }
+                DrawerEntry("Settings") {
+                    showSettings = true
+                    closeDrawer()
+                }
+                Text(
+                    "History and notes are saved on this phone only.",
+                    color = Dim, fontSize = 11.sp,
+                    modifier = Modifier.padding(24.dp)
+                )
+            }
+        }
+    ) {
+        Surface(modifier = Modifier.fillMaxSize(), color = Bg, contentColor = Color.White) {
+            Box(
                 Modifier
                     .fillMaxSize()
-                    .statusBarsPadding()
-                    .navigationBarsPadding()
-                    .imePadding()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color(0xFF01030A), Color(0xFF020712), Color(0xFF05163D))
+                        )
+                    )
             ) {
-                TopBar(
-                    name = vm.assistantName,
-                    onNotes = { showMemory = true },
-                    onSettings = { showSettings = true }
-                )
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .statusBarsPadding()
+                        .navigationBarsPadding()
+                        .imePadding()
+                ) {
+                    TopBar(vm.assistantName) { scope.launch { drawerState.open() } }
 
-                if (vm.messages.isEmpty()) {
-                    // ---------- HOME SCREEN ----------
-                    Column(
-                        Modifier.weight(1f).fillMaxWidth(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        OrbImage(vm.state, vm.level, 280.dp) { onMicClick() }
-                        Spacer(Modifier.height(20.dp))
-                        Text(
-                            if (userName.isBlank()) "Hello" else "Hello $userName",
-                            color = Color(0xFFCBD5E1), fontSize = 16.sp
-                        )
-                        Text(
-                            "How can I help\nyou today?",
-                            fontSize = 30.sp, lineHeight = 36.sp,
-                            fontWeight = FontWeight.Bold, textAlign = TextAlign.Center
-                        )
-                        Spacer(Modifier.height(10.dp))
-                        Text(
-                            stateLabel(vm.state),
-                            color = glowColor(vm.state), fontSize = 11.sp, letterSpacing = 3.sp
-                        )
-                        if (vm.handsFree) Text("Hands-free ON", color = Dim, fontSize = 11.sp)
-                        if (vm.heardText.isNotBlank()) {
-                            Text(
-                                "\"${vm.heardText}\"",
-                                fontSize = 15.sp, textAlign = TextAlign.Center, maxLines = 2,
-                                modifier = Modifier.padding(horizontal = 24.dp, vertical = 6.dp)
-                            )
-                        }
-                    }
-                } else {
-                    // ---------- CHAT SCREEN ----------
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OrbImage(vm.state, vm.level, 72.dp) { onMicClick() }
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                stateLabel(vm.state),
-                                color = glowColor(vm.state), fontSize = 11.sp, letterSpacing = 2.sp
-                            )
-                            if (vm.heardText.isNotBlank()) {
-                                Text("\"${vm.heardText}\"", fontSize = 14.sp, maxLines = 2)
-                            } else if (vm.handsFree) {
-                                Text("Hands-free ON", color = Dim, fontSize = 11.sp)
-                            }
-                        }
-                    }
-
-                    val listState = rememberLazyListState()
-                    LaunchedEffect(vm.messages.size) {
-                        if (vm.messages.isNotEmpty()) listState.animateScrollToItem(vm.messages.size - 1)
-                    }
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(vm.messages) { m -> Bubble(m) }
-                    }
-
-                    if (vm.pendingConfirm != null) {
+                    if (textMode) {
+                        // ---------- TEXT CHAT MODE ----------
                         Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Button(onClick = { vm.resolveConfirm(true) }, modifier = Modifier.weight(1f)) {
-                                Text("Yes")
+                            OrbImage(vm.state, vm.level, 64.dp) { onMicClick() }
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    stateLabel(vm.state),
+                                    color = glowColor(vm.state), fontSize = 11.sp, letterSpacing = 2.sp
+                                )
+                                if (vm.heardText.isNotBlank()) {
+                                    Text("\"${vm.heardText}\"", fontSize = 14.sp, maxLines = 2)
+                                }
                             }
-                            OutlinedButton(onClick = { vm.resolveConfirm(false) }, modifier = Modifier.weight(1f)) {
-                                Text("No")
+                        }
+
+                        val listState = rememberLazyListState()
+                        LaunchedEffect(vm.messages.size) {
+                            if (vm.messages.isNotEmpty()) listState.animateScrollToItem(vm.messages.size - 1)
+                        }
+                        if (vm.messages.isEmpty()) {
+                            Box(
+                                Modifier.weight(1f).fillMaxWidth(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("Type below to chat with ${vm.assistantName}.", color = Dim)
                             }
+                        } else {
+                            LazyColumn(
+                                state = listState,
+                                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 14.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                items(vm.messages) { m -> Bubble(m) }
+                            }
+                        }
+
+                        if (vm.pendingConfirm != null) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Button(onClick = { vm.resolveConfirm(true) }, modifier = Modifier.weight(1f)) {
+                                    Text("Yes")
+                                }
+                                OutlinedButton(onClick = { vm.resolveConfirm(false) }, modifier = Modifier.weight(1f)) {
+                                    Text("No")
+                                }
+                            }
+                        }
+
+                        Composer(
+                            name = vm.assistantName,
+                            input = input,
+                            onInput = { input = it },
+                            state = vm.state,
+                            level = vm.level,
+                            onSend = { send() },
+                            onMic = { onMicClick() }
+                        )
+                    } else {
+                        // ---------- VOICE MODE (orb only) ----------
+                        val last = vm.messages.lastOrNull()
+                        val warn = last != null && last.text.startsWith("⚠") && vm.state == JarvisState.IDLE
+                        val caption = last?.takeIf { !it.fromUser && (warn || !vm.speakReplies) }
+
+                        Column(
+                            Modifier.weight(1f).fillMaxWidth(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            OrbImage(vm.state, vm.level, 270.dp) { onMicClick() }
+                            Spacer(Modifier.height(12.dp))
+                            Box(
+                                Modifier.fillMaxWidth().height(170.dp),
+                                contentAlignment = Alignment.TopCenter
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    if (vm.messages.isEmpty()) {
+                                        Text(
+                                            if (userName.isBlank()) "Hello" else "Hello $userName",
+                                            color = Color(0xFFCBD5E1), fontSize = 16.sp
+                                        )
+                                        Text(
+                                            "How can I help\nyou today?",
+                                            fontSize = 30.sp, lineHeight = 36.sp,
+                                            fontWeight = FontWeight.Bold, textAlign = TextAlign.Center
+                                        )
+                                        Spacer(Modifier.height(8.dp))
+                                    }
+                                    Text(
+                                        stateLabel(vm.state),
+                                        color = glowColor(vm.state), fontSize = 11.sp, letterSpacing = 3.sp
+                                    )
+                                    if (vm.handsFree) Text("Hands-free ON", color = Dim, fontSize = 11.sp)
+                                    if (vm.heardText.isNotBlank()) {
+                                        Text(
+                                            "\"${vm.heardText}\"",
+                                            fontSize = 15.sp, textAlign = TextAlign.Center, maxLines = 2,
+                                            modifier = Modifier.padding(horizontal = 24.dp, vertical = 6.dp)
+                                        )
+                                    }
+                                    if (caption != null) {
+                                        Text(
+                                            caption.text,
+                                            color = if (warn) Amber else Dim,
+                                            fontSize = 13.sp, textAlign = TextAlign.Center, maxLines = 4,
+                                            modifier = Modifier.padding(horizontal = 24.dp, vertical = 6.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Box(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp)) {
+                            TypePill(Modifier.align(Alignment.CenterStart)) { goTyping() }
+                            MicButton(vm.state, vm.level, Modifier.align(Alignment.Center)) { onMicClick() }
                         }
                     }
                 }
-
-                AskBar(
-                    input = input,
-                    onInput = { input = it },
-                    state = vm.state,
-                    level = vm.level,
-                    onSend = { send() },
-                    onMic = { onMicClick() }
-                )
             }
         }
     }
@@ -282,22 +386,44 @@ fun JarvisApp(vm: JarvisViewModel) {
         SettingsDialog(vm, onDismiss = { showSettings = false }, onUserName = { userName = it })
     }
     if (showMemory) MemoryDialog(vm) { showMemory = false }
+    if (showHistory) HistoryDialog(chatStore, vm.assistantName) { showHistory = false }
 }
 
 @Composable
-fun TopBar(name: String, onNotes: () -> Unit, onSettings: () -> Unit) {
+private fun DrawerEntry(label: String, onClick: () -> Unit) {
+    NavigationDrawerItem(
+        label = { Text(label) },
+        selected = false,
+        onClick = onClick,
+        modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
+    )
+}
+
+@Composable
+fun TopBar(name: String, onMenu: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp),
+        Modifier.fillMaxWidth().padding(start = 8.dp, end = 16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        Canvas(Modifier.size(48.dp).clip(CircleShape).clickable { onMenu() }) {
+            val w = size.width * 0.42f
+            val x0 = (size.width - w) / 2f
+            val gap = 7.dp.toPx()
+            for (i in -1..1) {
+                val y = center.y + i * gap
+                drawLine(
+                    color = Color(0xFFBBD4FF),
+                    start = Offset(x0, y), end = Offset(x0 + w, y),
+                    strokeWidth = 2.5f.dp.toPx(), cap = StrokeCap.Round
+                )
+            }
+        }
+        Spacer(Modifier.width(6.dp))
         Text(
             name.uppercase(),
             color = Cyan, fontSize = 16.sp,
-            fontWeight = FontWeight.Bold, letterSpacing = 5.sp,
-            modifier = Modifier.weight(1f)
+            fontWeight = FontWeight.Bold, letterSpacing = 5.sp
         )
-        TextButton(onClick = onNotes) { Text("Notes") }
-        TextButton(onClick = onSettings) { Text("Settings") }
     }
 }
 
@@ -360,66 +486,43 @@ fun OrbImage(state: JarvisState, level: Float, diameter: Dp, onClick: () -> Unit
 }
 
 @Composable
-fun AskBar(
-    input: String,
-    onInput: (String) -> Unit,
-    state: JarvisState,
-    level: Float,
-    onSend: () -> Unit,
-    onMic: () -> Unit
-) {
-    val shape = RoundedCornerShape(32.dp)
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 14.dp)
-            .background(
-                Brush.horizontalGradient(listOf(Color(0xFF0A2A66), Color(0xFF0B3C94))),
-                shape
-            )
-            .border(1.dp, Color(0xFF2F6BFF), shape)
-            .padding(start = 8.dp, end = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
+fun TypePill(modifier: Modifier, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(24.dp)
+    Box(
+        modifier
+            .clip(shape)
+            .background(Panel)
+            .border(1.dp, Edge, shape)
+            .clickable { onClick() }
+            .padding(horizontal = 18.dp, vertical = 12.dp)
     ) {
-        OutlinedTextField(
-            value = input,
-            onValueChange = onInput,
-            modifier = Modifier.weight(1f),
-            singleLine = true,
-            placeholder = { Text("Ask anything...", color = Color(0xFF9DB7E8)) },
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { onSend() }),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedTextColor = Color.White,
-                unfocusedTextColor = Color.White,
-                cursorColor = Cyan,
-                focusedBorderColor = Color.Transparent,
-                unfocusedBorderColor = Color.Transparent,
-                focusedContainerColor = Color.Transparent,
-                unfocusedContainerColor = Color.Transparent
-            )
-        )
-        if (input.isNotBlank()) {
-            Box(
-                Modifier.size(44.dp).clip(CircleShape).background(Cyan).clickable { onSend() },
-                contentAlignment = Alignment.Center
-            ) { Text("➤", color = Bg, fontSize = 18.sp) }
-        } else {
-            WaveIcon(state, level, onMic)
-        }
+        Text("Type", color = Color(0xFFBBD4FF), fontSize = 14.sp)
     }
 }
 
 @Composable
-fun WaveIcon(state: JarvisState, level: Float, onClick: () -> Unit) {
+fun MicButton(state: JarvisState, level: Float, modifier: Modifier, onClick: () -> Unit) {
+    Box(
+        modifier
+            .size(68.dp)
+            .clip(CircleShape)
+            .background(Brush.horizontalGradient(BtnGrad))
+            .border(1.dp, Edge, CircleShape)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) { WaveGlyph(state, level, 40.dp) }
+}
+
+@Composable
+fun WaveGlyph(state: JarvisState, level: Float, box: Dp) {
     val pattern = listOf(0.35f, 0.65f, 1f, 0.65f, 0.35f)
     val listening = state == JarvisState.LISTENING
     val color = when (state) {
-        JarvisState.LISTENING -> Green
+        JarvisState.LISTENING -> Color(0xFF3DDC84)
         JarvisState.SPEAKING -> Color(0xFFB39DFF)
         else -> Color(0xFFBBD4FF)
     }
-    Canvas(Modifier.size(48.dp).clip(CircleShape).clickable { onClick() }) {
+    Canvas(Modifier.size(box)) {
         val gap = size.width / 6f
         val maxH = size.height * 0.6f
         val k = if (listening) 0.3f + 0.7f * level else 0.75f
@@ -438,19 +541,94 @@ fun WaveIcon(state: JarvisState, level: Float, onClick: () -> Unit) {
 }
 
 @Composable
+fun SendGlyph(color: Color, box: Dp) {
+    Canvas(Modifier.size(box)) {
+        val cx = center.x
+        val top = size.height * 0.2f
+        val bottom = size.height * 0.8f
+        val sw = 2.5f.dp.toPx()
+        drawLine(color, Offset(cx, bottom), Offset(cx, top), strokeWidth = sw, cap = StrokeCap.Round)
+        drawLine(
+            color, Offset(cx, top), Offset(cx - size.width * 0.28f, top + size.height * 0.28f),
+            strokeWidth = sw, cap = StrokeCap.Round
+        )
+        drawLine(
+            color, Offset(cx, top), Offset(cx + size.width * 0.28f, top + size.height * 0.28f),
+            strokeWidth = sw, cap = StrokeCap.Round
+        )
+    }
+}
+
+@Composable
+fun Composer(
+    name: String,
+    input: String,
+    onInput: (String) -> Unit,
+    state: JarvisState,
+    level: Float,
+    onSend: () -> Unit,
+    onMic: () -> Unit
+) {
+    val shape = RoundedCornerShape(28.dp)
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        try { focus.requestFocus() } catch (e: Exception) { }
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .background(Panel, shape)
+            .border(1.dp, Edge, shape)
+            .padding(start = 18.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.Bottom
+    ) {
+        Box(Modifier.weight(1f).padding(vertical = 10.dp)) {
+            if (input.isEmpty()) Text("Message $name", color = Dim, fontSize = 16.sp)
+            BasicTextField(
+                value = input,
+                onValueChange = onInput,
+                textStyle = TextStyle(color = Color.White, fontSize = 16.sp),
+                cursorBrush = SolidColor(Cyan),
+                maxLines = 6,
+                modifier = Modifier.fillMaxWidth().focusRequester(focus)
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        if (input.isNotBlank()) {
+            Box(
+                Modifier.size(44.dp).clip(CircleShape).background(Cyan).clickable { onSend() },
+                contentAlignment = Alignment.Center
+            ) { SendGlyph(Bg, 22.dp) }
+        } else {
+            Box(
+                Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(Brush.horizontalGradient(BtnGrad))
+                    .border(1.dp, Edge, CircleShape)
+                    .clickable { onMic() },
+                contentAlignment = Alignment.Center
+            ) { WaveGlyph(state, level, 28.dp) }
+        }
+    }
+}
+
+@Composable
 fun Bubble(m: ChatMessage) {
     val warn = m.text.startsWith("⚠")
+    if (!m.fromUser && !warn) {
+        // Assistant replies: plain text, like ChatGPT
+        Text(
+            m.text,
+            color = Color(0xFFE6EEF9), fontSize = 16.sp, lineHeight = 23.sp,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)
+        )
+        return
+    }
     val shape = RoundedCornerShape(18.dp)
-    val bg = when {
-        m.fromUser -> Color(0xFF0C3A7A)
-        warn -> Color(0xFF2A2110)
-        else -> Panel
-    }
-    val edge = when {
-        m.fromUser -> Color(0xFF2F6BFF)
-        warn -> Amber.copy(alpha = 0.5f)
-        else -> Color(0xFF1B2C4A)
-    }
+    val bg = if (m.fromUser) Color(0xFF0C3A7A) else Color(0xFF2A2110)
+    val edge = if (m.fromUser) Edge else Amber.copy(alpha = 0.5f)
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = if (m.fromUser) Arrangement.End else Arrangement.Start
@@ -469,6 +647,37 @@ fun Bubble(m: ChatMessage) {
 }
 
 @Composable
+fun HistoryDialog(store: ChatStore, name: String, onDismiss: () -> Unit) {
+    var list by remember { mutableStateOf(store.getAll()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Chat history") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text("Saved only on this phone. Delete it anytime.", fontSize = 12.sp)
+                Spacer(Modifier.height(8.dp))
+                if (list.isEmpty()) Text("No history yet.")
+                list.forEach { m ->
+                    Text(
+                        (if (m.fromUser) "You: " else "$name: ") + m.text,
+                        color = if (m.fromUser) Cyan else Color.White,
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        dismissButton = {
+            TextButton(onClick = {
+                store.clear()
+                list = emptyList()
+            }) { Text("Delete all") }
+        }
+    )
+}
+
+@Composable
 fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (String) -> Unit) {
     var key by remember { mutableStateOf(vm.settings.apiKey) }
     var model by remember { mutableStateOf(vm.settings.model) }
@@ -482,6 +691,7 @@ fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (Stri
     var inKey by remember { mutableStateOf(vm.settings.inworldKey) }
     var inVoice by remember { mutableStateOf(vm.settings.inworldVoiceId) }
     var inModel by remember { mutableStateOf(vm.settings.inworldModel) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Settings") },
@@ -534,7 +744,7 @@ fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (Stri
                     )
                 }
                 Spacer(Modifier.height(8.dp))
-                                Text("Inworld voice (optional)")
+                Text("Inworld voice (optional)")
                 OutlinedTextField(
                     value = inKey, onValueChange = { inKey = it },
                     label = { Text("Inworld API key") },
@@ -590,10 +800,11 @@ fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (Stri
                 Spacer(Modifier.height(8.dp))
                 Text(
                     "PRIVACY\n" +
-                        "On this phone only: your API key (encrypted), settings and saved notes.\n" +
+                        "On this phone only: your keys (encrypted), settings, saved notes and chat history.\n" +
                         "Sent to Google Gemini: what you type or say (as text), recent chat, the " +
                         "personality text and your saved notes, but only for questions that are " +
                         "not local commands.\n" +
+                        "Sent to Inworld (only if you set it up): the text of replies, to make the voice.\n" +
                         "Local commands (open app, torch, time, dialer) never go online.\n" +
                         "Voice recognition is done by your phone's speech service and may use " +
                         "internet. On the free tier Google may use data to improve its products, " +
@@ -605,7 +816,7 @@ fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (Stri
         confirmButton = {
             TextButton(onClick = {
                 vm.settings.userName = userNameField
-                                vm.settings.inworldKey = inKey
+                vm.settings.inworldKey = inKey
                 vm.settings.inworldVoiceId = inVoice
                 vm.settings.inworldModel = inModel.ifBlank { "inworld-tts-1.5-max" }
                 onUserName(userNameField.trim())

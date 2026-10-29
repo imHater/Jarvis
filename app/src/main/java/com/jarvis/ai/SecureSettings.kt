@@ -26,6 +26,17 @@ class SecureSettings(context: Context) {
     var userName: String
         get() = prefs.getString("user_name", "") ?: ""
         set(v) = prefs.edit().putString("user_name", v.trim()).apply()
+            var inworldKey: String
+        get() = prefs.getString("inworld_key", "") ?: ""
+        set(v) = prefs.edit().putString("inworld_key", v.trim()).apply()
+
+    var inworldVoiceId: String
+        get() = prefs.getString("inworld_voice", "") ?: ""
+        set(v) = prefs.edit().putString("inworld_voice", v.trim()).apply()
+
+    var inworldModel: String
+        get() = prefs.getString("inworld_model", "inworld-tts-1.5-max") ?: "inworld-tts-1.5-max"
+        set(v) = prefs.edit().putString("inworld_model", v.trim()).apply()
     var apiKey: String
         get() = prefs.getString("api_key", "") ?: ""
         set(v) = prefs.edit().putString("api_key", v.trim()).apply()

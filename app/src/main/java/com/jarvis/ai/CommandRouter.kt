@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
-import android.provider.AlarmClock
 import android.provider.Settings
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -29,6 +28,7 @@ class CommandRouter(
     private val memory: MemoryStore
 ) {
     private val phone = PhoneActions(context)
+    private val system = SystemActions(context)
 
     fun handle(input: String): CommandResult {
         val original = input.trim()
@@ -71,15 +71,6 @@ class CommandRouter(
             }
         }
 
-        // Alarms and reminders (opens the clock app; you set the time there)
-        if (words.any { it == "alarm" || it == "reminder" }) {
-            val ok = launch(Intent(AlarmClock.ACTION_SHOW_ALARMS))
-            return CommandResult.Reply(
-                if (ok) "Opening your clock app. Tap + to add an alarm."
-                else "I couldn't open the clock app. Please open it manually."
-            )
-        }
-
         // Calls: always asks first. Names are looked up in your contacts.
         val callTarget = Regex("^(?:call|dial|phone)\\s+(.+)$").find(t)?.groupValues?.get(1)
             ?: Regex("^(.+?)\\s+ko\\s+(?:call|phone|fone)(?:\\s+(?:karo|kar do|kar|lagao|laga do|lagana))?$")
@@ -87,6 +78,9 @@ class CommandRouter(
         if (callTarget != null) {
             return phone.callConfirm(callTarget.removePrefix("to ").trim())
         }
+
+        // Alarms, timers, silent, volume, Wi-Fi panels, YouTube / Google / Maps search
+        system.handle(original, t)?.let { return it }
 
         // Open apps / settings
         val openName = Regex("^(?:open|launch|start)\\s+(.+)$").find(t)?.groupValues?.get(1)
@@ -141,10 +135,10 @@ class CommandRouter(
     }
 
     companion object {
-        const val HELP = "I can: open apps (\"open youtube\" / \"youtube kholo\"), open settings, " +
-            "torch on/off, tell time and date, call a contact (\"call ammi\" / \"ammi ko call karo\"), " +
-            "send an SMS (\"ammi ko sms bhejo ki main late aaunga\"), open the clock app (\"alarm\"), " +
-            "and save notes (\"remember ...\" / \"yaad rakho ...\"). " +
-            "For everything else I use online AI, which needs internet. I always ask before calling or sending."
+        const val HELP = "I can: open apps, search YouTube or Google, start navigation, " +
+            "set alarms and timers, silent or vibrate mode, volume, torch, open Wi-Fi, hotspot " +
+            "and Bluetooth panels, call a contact, prepare an SMS, tell time and date, " +
+            "and save notes. I always ask before calling or sending. " +
+            "For everything else I use online AI, which needs internet."
     }
 }

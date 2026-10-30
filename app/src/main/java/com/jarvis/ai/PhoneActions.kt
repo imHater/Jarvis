@@ -5,12 +5,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import android.provider.ContactsContract
-import android.telephony.SmsManager
 import androidx.core.content.ContextCompat
 
-/** Calls and SMS. Used only after you say yes, and only with permissions you give. */
+/** Calls and SMS drafts. Used only after you say yes, and only with permissions you give. */
 class PhoneActions(private val context: Context) {
 
     private data class Contact(val name: String, val number: String)
@@ -47,11 +45,14 @@ class PhoneActions(private val context: Context) {
     }
 
     fun smsConfirm(who: String, msg: String): CommandResult.Confirm {
-        val perms = mutableListOf(Manifest.permission.SEND_SMS)
+        val perms = mutableListOf<String>()
         if (!isNumber(who)) perms.add(Manifest.permission.READ_CONTACTS)
-        return CommandResult.Confirm("Send this SMS to $who? \"$msg\"", perms) {
+        return CommandResult.Confirm(
+            "Open the SMS app for $who with this message? You will press Send yourself. \"$msg\"",
+            perms
+        ) {
             val r = resolve(who)
-            if (r.error != null) r.error else sendSms(r.number ?: "", r.label, msg)
+            if (r.error != null) r.error else openSms(r.number ?: "", r.label, msg)
         }
     }
 
@@ -121,23 +122,17 @@ class PhoneActions(private val context: Context) {
         }
     }
 
-    @Suppress("DEPRECATION")
-    private fun sendSms(number: String, label: String, text: String): String {
+    /** Opens the SMS app with the number and text filled in. You press Send. */
+    private fun openSms(number: String, label: String, text: String): String {
         return try {
-            val sms: SmsManager? = if (Build.VERSION.SDK_INT >= 31) {
-                context.getSystemService(SmsManager::class.java)
-            } else {
-                SmsManager.getDefault()
-            }
-            if (sms == null) return "This phone cannot send SMS."
-            val parts = sms.divideMessage(text)
-            if (parts.size > 1) sms.sendMultipartTextMessage(number, null, parts, null, null)
-            else sms.sendTextMessage(number, null, text, null, null)
-            "SMS sent to $label."
-        } catch (e: SecurityException) {
-            "SMS permission is missing."
+            val clean = number.replace(Regex("[^+\\d]"), "")
+            val i = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$clean"))
+            i.putExtra("sms_body", text)
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(i)
+            "The message for $label is ready. Please press Send."
         } catch (e: Exception) {
-            "I couldn't send the SMS."
+            "I couldn't open the SMS app."
         }
     }
 

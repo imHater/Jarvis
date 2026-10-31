@@ -18,6 +18,7 @@ sealed class CommandResult {
     data class Confirm(
         val prompt: String,
         val permissions: List<String> = emptyList(),
+        val auto: Boolean = false,
         val onYes: () -> String
     ) : CommandResult()
 }

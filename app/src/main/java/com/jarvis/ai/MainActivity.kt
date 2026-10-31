@@ -172,7 +172,7 @@ fun JarvisApp(vm: JarvisViewModel) {
         else vm.showNotice("Microphone permission was denied. You can still type to me.")
     }
 
-    // Permissions for calls / SMS / contacts, asked only after you say yes.
+    // Permissions for calls / contacts, asked only after you say yes.
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { vm.permissionsResult() }
@@ -705,6 +705,11 @@ fun HistoryDialog(store: ChatStore, name: String, onDismiss: () -> Unit) {
 
 @Composable
 fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (String) -> Unit) {
+    val ctx = LocalContext.current
+    val notifLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
+
     var key by remember { mutableStateOf(vm.settings.apiKey) }
     var model by remember { mutableStateOf(vm.settings.model) }
     var userNameField by remember { mutableStateOf(vm.settings.userName) }
@@ -717,6 +722,8 @@ fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (Stri
     var inKey by remember { mutableStateOf(vm.settings.inworldKey) }
     var inVoice by remember { mutableStateOf(vm.settings.inworldVoiceId) }
     var inModel by remember { mutableStateOf(vm.settings.inworldModel) }
+    var picoKey by remember { mutableStateOf(vm.settings.picoKey) }
+    var wakeOn by remember { mutableStateOf(vm.settings.wakeEnabled) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -794,6 +801,26 @@ fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (Stri
                     fontSize = 11.sp
                 )
                 Spacer(Modifier.height(8.dp))
+                Text("Wake word \"Jarvis\" (optional)")
+                OutlinedTextField(
+                    value = picoKey, onValueChange = { picoKey = it },
+                    label = { Text("Picovoice AccessKey") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true, modifier = Modifier.fillMaxWidth()
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Listen for \"Jarvis\" even when the app is closed", modifier = Modifier.weight(1f))
+                    Switch(checked = wakeOn, onCheckedChange = { wakeOn = it })
+                }
+                Text(
+                    "When ON, a notification stays visible and the mic listens only for the word " +
+                        "\"Jarvis\" (detected on the phone by Picovoice). After that, what you say is " +
+                        "recognized by your phone's speech service and sent to Gemini as usual. " +
+                        "This uses more battery. Get a free AccessKey at console.picovoice.ai. " +
+                        "After saving, press Home so listening can start.",
+                    fontSize = 11.sp
+                )
+                Spacer(Modifier.height(8.dp))
                 Text("Speaking speed")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
@@ -819,8 +846,7 @@ fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (Stri
                 }
                 Text(
                     "Hands-free: after a reply is spoken, it listens again. It stops after a few " +
-                        "seconds of silence, when you tap the orb, or when you leave the app. " +
-                        "It never listens in the background.",
+                        "seconds of silence, when you tap the orb, or when you leave the app.",
                     fontSize = 11.sp
                 )
                 Spacer(Modifier.height(8.dp))
@@ -831,9 +857,11 @@ fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (Stri
                         "personality text and your saved notes, but only for questions that are " +
                         "not local commands.\n" +
                         "Sent to Inworld (only if you set it up): the text of replies, to make the voice.\n" +
-                        "Calls and SMS: only after you say yes. Contacts are searched on the phone " +
+                        "Wake word (only if you turn it on): the word \"Jarvis\" is detected on the phone; " +
+                        "nothing is sent anywhere until you speak a request.\n" +
+                        "Calls: only after you say yes. Contacts are searched on the phone " +
                         "for the name you say; the contact list is never sent anywhere.\n" +
-                        "Local commands (open app, torch, time, dialer) never go online.\n" +
+                        "Local commands (open app, torch, time) never go online.\n" +
                         "Voice recognition is done by your phone's speech service and may use " +
                         "internet. On the free tier Google may use data to improve its products, " +
                         "so never say passwords or bank details. Free limits apply.",
@@ -847,6 +875,13 @@ fun SettingsDialog(vm: JarvisViewModel, onDismiss: () -> Unit, onUserName: (Stri
                 vm.settings.inworldKey = inKey
                 vm.settings.inworldVoiceId = inVoice
                 vm.settings.inworldModel = inModel.ifBlank { "inworld-tts-2" }
+                vm.settings.picoKey = picoKey
+                val wakeReady = wakeOn && picoKey.isNotBlank()
+                vm.settings.wakeEnabled = wakeReady
+                if (wakeReady && android.os.Build.VERSION.SDK_INT >= 33) {
+                    notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                }
+                WakeService.setEnabled(ctx, wakeReady)
                 onUserName(userNameField.trim())
                 vm.saveSettings(key, model, name, personality, lang, speak, hands, speed)
                 onDismiss()

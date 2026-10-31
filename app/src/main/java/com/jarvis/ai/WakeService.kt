@@ -1,329 +1,238 @@
 package com.jarvis.ai
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.Service
 import android.content.Context
-import android.content.Intent
-import android.content.pm.ServiceInfo
-import android.media.AudioManager
-import android.media.ToneGenerator
 import android.os.Handler
-import android.os.IBinder
 import android.os.Looper
-import android.os.PowerManager
-import androidx.core.app.NotificationCompat
-import androidx.core.app.ServiceCompat
-import androidx.core.content.ContextCompat
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
-
-/** Holds a command that needs the app screen (set by the wake service, used by the app). */
-object PendingCommand {
-    @Volatile
-    var text: String? = null
-
-    fun take(): String? {
-        val t = text
-        text = null
-        return t
-    }
-}
+import org.json.JSONObject
+import org.vosk.Model
+import org.vosk.Recognizer
+import org.vosk.android.RecognitionListener
+import org.vosk.android.SpeechService
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.zip.ZipInputStream
 
 /**
- * Listens for the wake word "Jarvis" (on the phone, with open-source Vosk), then listens to one
- * request, answers by voice, and goes back to waiting.
+ * Our own wake word: "Jarvis" is detected on the phone with the open-source Vosk engine.
+ * The voice model (about 40 MB) is downloaded once; after that it works offline.
  */
-class WakeService : Service() {
-
+class VoskWake(
+    private val context: Context,
+    private val onStatus: (String) -> Unit,
+    private val onWakeWord: () -> Unit,
+    private val onFailed: (String) -> Unit
+) {
     private val main = Handler(Looper.getMainLooper())
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var model: Model? = null
+    private var recognizer: Recognizer? = null
+    private var service: SpeechService? = null
+    private var ready = false
+    private var wanted = false
+    private var loading = false
+    private var triggered = false
+    private var loadToken = 0
 
-    private lateinit var settings: SecureSettings
-    private lateinit var memory: MemoryStore
-    private lateinit var router: CommandRouter
-    private lateinit var ai: AiClient
-    private lateinit var phone: PhoneActions
-    private lateinit var voice: VoiceManager
-
-    private var vosk: VoskWake? = null
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var wakeListening = false
-    private var busy = false
-    private var appOpen = false
-    private var session = 0
-
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    override fun onCreate() {
-        super.onCreate()
-        instance = this
-        appOpen = visibleFlag
-        settings = SecureSettings(this)
-        memory = MemoryStore(this)
-        router = CommandRouter(this, memory)
-        ai = AiClient(settings)
-        phone = PhoneActions(this)
-        voice = VoiceManager(this, onSpeakingDone = { resume() }, onLevel = { })
-        voice.speechRate = getSharedPreferences("jarvis_ui", 0).getFloat("speed", 1.0f)
-        createChannels()
-    }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            settings.wakeEnabled = false
-            stopSelf()
-            return START_NOT_STICKY
+    private val listener = object : RecognitionListener {
+        override fun onPartialResult(hypothesis: String?) { heard(hypothesis) }
+        override fun onResult(hypothesis: String?) { heard(hypothesis) }
+        override fun onFinalResult(hypothesis: String?) { }
+        override fun onError(exception: Exception?) {
+            onStatus("Wake word error: ${exception?.message}")
         }
-        ServiceCompat.startForeground(
-            this, NOTIF_ID, buildNotification("Starting..."),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-        )
-        acquireWakeLock()
-        startWake()
-        return START_NOT_STICKY
+        override fun onTimeout() { }
     }
 
-    override fun onDestroy() {
-        instance = null
-        try { vosk?.release() } catch (e: Exception) { }
-        vosk = null
-        try { voice.shutdown() } catch (e: Exception) { }
-        scope.cancel()
-        try {
-            if (wakeLock?.isHeld == true) wakeLock?.release()
+    private fun heard(json: String?) {
+        if (json.isNullOrBlank() || triggered || !wanted) return
+        val text = try {
+            val o = JSONObject(json)
+            val t = o.optString("text")
+            if (t.isNotBlank()) t else o.optString("partial")
         } catch (e: Exception) {
+            ""
         }
-        super.onDestroy()
-    }
-
-    // ---------- Wake word ----------
-
-    private fun startWake() {
-        if (wakeListening) return
-        if (appOpen) {
-            updateStatus("Paused while the app is open")
-            return
-        }
-        if (vosk == null) {
-            vosk = VoskWake(
-                this,
-                onStatus = { updateStatus(it) },
-                onWakeWord = { onWake() },
-                onFailed = { failed(it) }
-            )
-        }
-        wakeListening = true
-        updateStatus("Starting...")
-        vosk?.start()
-    }
-
-    private fun pauseWake() {
-        try { vosk?.pause() } catch (e: Exception) { }
-        wakeListening = false
-        updateStatus("Paused while the app is open")
-    }
-
-    private fun setAppVisible(v: Boolean) {
-        main.post {
-            appOpen = v
-            if (!busy) {
-                if (v) pauseWake() else startWake()
-            }
-        }
-    }
-
-    private fun onWake() {
-        if (busy || appOpen) return
-        busy = true
-        val my = ++session
-        try { vosk?.pause() } catch (e: Exception) { }
-        wakeListening = false
-        updateStatus("Listening to you...")
-        beep()
-        main.postDelayed({ if (busy && session == my) listenNow() }, 500)
-        // Safety: never stay stuck.
-        main.postDelayed({
-            if (busy && session == my) {
-                voice.stopListening()
-                voice.stopSpeaking()
-                resume()
-            }
-        }, 60000)
-    }
-
-    private fun listenNow() {
-        val lang = getSharedPreferences("jarvis_ui", 0).getString("lang", "en-IN") ?: "en-IN"
-        voice.startListening(
-            lang,
-            onPartial = { },
-            onText = { handle(it) },
-            onFail = { _, _ -> resume() }
-        )
-    }
-
-    private fun resume() {
-        if (!busy) return
-        session++
-        busy = false
-        main.postDelayed({ if (!busy) startWake() }, 500)
-    }
-
-    // ---------- Handling the request ----------
-
-    private fun handle(text: String) {
         val t = text.lowercase()
-        if (NEEDS_APP.containsMatchIn(t)) {
-            handoff(text)
+        if (WAKE_WORDS.any { t.contains(it) }) {
+            triggered = true
+            main.post { onWakeWord() }
+        }
+    }
+
+    /** Starts listening for the wake word (downloads the voice model the first time). */
+    fun start() {
+        wanted = true
+        if (service != null) return
+        if (ready) {
+            beginListening()
             return
         }
-        when (val r = router.handle(text)) {
-            is CommandResult.Reply -> say(r.text)
-            is CommandResult.Confirm -> handoff(text)
-            CommandResult.NotACommand -> askAi(text)
+        if (loading) return
+        loading = true
+        val my = ++loadToken
+
+        // If loading takes too long, tell the user instead of staying stuck.
+        main.postDelayed({
+            if (loading && my == loadToken) {
+                loading = false
+                onFailed("The voice model is taking too long. Turn the wake word off and on again.")
+            }
+        }, 150000)
+
+        Thread {
+            var err: String? = null
+            var loadedModel: Model? = null
+            var loadedRec: Recognizer? = null
+            try {
+                val dir = File(context.filesDir, "vosk")
+                val modelDir = File(dir, MODEL_NAME)
+                val marker = File(dir, ".ok_$MODEL_NAME")
+
+                if (!marker.exists()) {
+                    modelDir.deleteRecursively()
+                    err = downloadModel(dir, marker)
+                }
+                if (err == null) {
+                    post("Loading voice model...")
+                    try {
+                        loadedModel = Model(modelDir.absolutePath)
+                    } catch (t: Throwable) {
+                        // Broken or incomplete files: remove them so the next start downloads again.
+                        marker.delete()
+                        modelDir.deleteRecursively()
+                        throw t
+                    }
+                    post("Preparing wake word...")
+                    loadedRec = Recognizer(loadedModel, 16000.0f)
+                }
+            } catch (t: Throwable) {
+                err = "Wake word setup failed: ${t.javaClass.simpleName}: ${t.message}"
+            }
+            main.post {
+                if (my != loadToken) return@post
+                loading = false
+                if (err == null && loadedModel != null && loadedRec != null) {
+                    model = loadedModel
+                    recognizer = loadedRec
+                    ready = true
+                    if (wanted) beginListening()
+                } else {
+                    onFailed(err ?: "Voice model failed.")
+                }
+            }
+        }.start()
+    }
+
+    private fun post(text: String) {
+        main.post { onStatus(text) }
+    }
+
+    private fun beginListening() {
+        val r = recognizer ?: return
+        try {
+            triggered = false
+            val s = SpeechService(r, 16000.0f)
+            service = s
+            s.startListening(listener)
+            onStatus("Listening for \"Jarvis\"")
+        } catch (t: Throwable) {
+            service = null
+            onFailed("Wake word could not start: ${t.javaClass.simpleName}: ${t.message}")
         }
     }
 
-    private fun askAi(text: String) {
-        updateStatus("Thinking...")
-        scope.launch {
-            when (val r = ai.ask(listOf(ChatMessage(text, true)), memory.getAll())) {
-                is AiResult.Success -> {
-                    if (phone.fromAiText(r.text) != null) handoff(text) else say(r.text)
+    /** Stops listening and frees the microphone. */
+    fun pause() {
+        wanted = false
+        val s = service
+        service = null
+        if (s != null) {
+            try { s.stop() } catch (t: Throwable) { }
+            try { s.shutdown() } catch (t: Throwable) { }
+        }
+    }
+
+    fun release() {
+        loadToken++ // cancels any loading in progress
+        loading = false
+        pause()
+        try { (recognizer as? java.io.Closeable)?.close() } catch (t: Throwable) { }
+        recognizer = null
+        try { (model as? java.io.Closeable)?.close() } catch (t: Throwable) { }
+        model = null
+        ready = false
+    }
+
+    private fun downloadModel(dir: File, marker: File): String? {
+        return try {
+            dir.mkdirs()
+            val zip = File(dir, "model.zip")
+            val conn = URL(MODEL_URL).openConnection() as HttpURLConnection
+            conn.connectTimeout = 20000
+            conn.readTimeout = 60000
+            if (conn.responseCode != 200) {
+                return "Voice model download failed (${conn.responseCode})."
+            }
+            val total = conn.contentLengthLong
+            var done = 0L
+            var lastPct = -1
+            conn.inputStream.use { input ->
+                FileOutputStream(zip).use { out ->
+                    val buf = ByteArray(64 * 1024)
+                    var n = input.read(buf)
+                    while (n > 0) {
+                        out.write(buf, 0, n)
+                        done += n
+                        if (total > 0) {
+                            val pct = (done * 100 / total).toInt()
+                            if (pct != lastPct && pct % 5 == 0) {
+                                lastPct = pct
+                                post("Downloading voice model $pct%")
+                            }
+                        }
+                        n = input.read(buf)
+                    }
                 }
-                is AiResult.Failure -> say("Sorry, I could not get an answer right now.")
+            }
+            post("Unpacking voice model...")
+            unzip(zip, dir)
+            zip.delete()
+            if (!File(dir, MODEL_NAME).exists()) {
+                return "Voice model folder not found after unpacking."
+            }
+            marker.writeText("ok")
+            null
+        } catch (t: Throwable) {
+            "Voice model download failed: ${t.message}"
+        }
+    }
+
+    private fun unzip(zip: File, dest: File) {
+        val root = dest.canonicalPath + File.separator
+        ZipInputStream(FileInputStream(zip)).use { zis ->
+            var entry = zis.nextEntry
+            while (entry != null) {
+                val out = File(dest, entry.name)
+                if (!out.canonicalPath.startsWith(root)) {
+                    throw SecurityException("Unsafe file in the voice model zip")
+                }
+                if (entry.isDirectory) {
+                    out.mkdirs()
+                } else {
+                    out.parentFile?.mkdirs()
+                    FileOutputStream(out).use { zis.copyTo(it) }
+                }
+                zis.closeEntry()
+                entry = zis.nextEntry
             }
         }
-    }
-
-    private fun say(text: String) {
-        updateStatus("Speaking...")
-        if (!voice.speak(text)) resume()
-    }
-
-    /** Android won't let a background service open apps. So we put a button in the notification. */
-    private fun handoff(text: String) {
-        PendingCommand.text = text
-        val open = PendingIntent.getActivity(
-            this, 2,
-            Intent(this, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        val n = NotificationCompat.Builder(this, CH_INFO)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("Kabir needs the app for this")
-            .setContentText("Tap to run: $text")
-            .setContentIntent(open)
-            .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .build()
-        getSystemService(NotificationManager::class.java).notify(NOTIF_ID_HANDOFF, n)
-        say("Android needs the app screen for that. I put a button in your notifications. Please tap it.")
-    }
-
-    // ---------- Helpers ----------
-
-    private fun beep() {
-        try {
-            val tg = ToneGenerator(AudioManager.STREAM_MUSIC, 70)
-            tg.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
-            main.postDelayed({
-                try { tg.release() } catch (e: Exception) { }
-            }, 400)
-        } catch (e: Exception) {
-        }
-    }
-
-    private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == true) return
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Kabir:wake").also { it.acquire() }
-    }
-
-    private fun createChannels() {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(
-            NotificationChannel(CH_WAKE, "Wake word", NotificationManager.IMPORTANCE_LOW)
-        )
-        nm.createNotificationChannel(
-            NotificationChannel(CH_INFO, "Kabir alerts", NotificationManager.IMPORTANCE_HIGH)
-        )
-    }
-
-    private fun buildNotification(text: String): Notification {
-        val stop = PendingIntent.getService(
-            this, 0,
-            Intent(this, WakeService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        val open = PendingIntent.getActivity(
-            this, 1,
-            Intent(this, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        return NotificationCompat.Builder(this, CH_WAKE)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("Kabir")
-            .setContentText(text)
-            .setContentIntent(open)
-            .addAction(0, "Turn off", stop)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
-    }
-
-    private fun updateStatus(text: String) {
-        getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification(text))
-    }
-
-    private fun failed(msg: String) {
-        settings.wakeEnabled = false
-        val n = NotificationCompat.Builder(this, CH_INFO)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("Kabir wake word is off")
-            .setContentText(msg)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(msg))
-            .setAutoCancel(true)
-            .build()
-        getSystemService(NotificationManager::class.java).notify(NOTIF_ID_INFO, n)
-        stopSelf()
     }
 
     companion object {
-        private const val CH_WAKE = "kabir_wake"
-        private const val CH_INFO = "kabir_info"
-        private const val NOTIF_ID = 11
-        private const val NOTIF_ID_INFO = 12
-        private const val NOTIF_ID_HANDOFF = 13
-        const val ACTION_STOP = "com.jarvis.ai.STOP_WAKE"
-
-        // Things Android only lets us do with the app on screen.
-        private val NEEDS_APP = Regex(
-            "\\b(open|launch|kholo|khol|call|dial|sms|youtube|yt|google|search|dhundo|navigate|" +
-                "rasta|map|maps|wifi|wi-fi|hotspot|bluetooth|alarm|timer|reminder|screenshot|" +
-                "settings|brightness|airplane)\\b"
-        )
-
-        @Volatile private var instance: WakeService? = null
-        @Volatile private var visibleFlag = false
-
-        /** Called when the app screen appears or disappears (wake listening pauses while visible). */
-        fun appVisible(visible: Boolean) {
-            visibleFlag = visible
-            instance?.setAppVisible(visible)
-        }
-
-        fun setEnabled(ctx: Context, on: Boolean) {
-            val i = Intent(ctx, WakeService::class.java)
-            if (on) ContextCompat.startForegroundService(ctx, i) else ctx.stopService(i)
-        }
+        private const val MODEL_NAME = "vosk-model-small-en-us-0.15"
+        private const val MODEL_URL = "https://alphacephei.com/vosk/models/$MODEL_NAME.zip"
+        private val WAKE_WORDS = listOf("jarvis", "jar vis", "jarvish", "jarvas")
     }
 }

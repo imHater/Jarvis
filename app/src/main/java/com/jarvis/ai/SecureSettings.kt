@@ -5,7 +5,7 @@ import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
-/** Saves your API key and settings on this phone only (encrypted). */
+/** Saves your keys and settings on this phone only (encrypted). */
 class SecureSettings(context: Context) {
 
     private val prefs: SharedPreferences = try {
@@ -23,10 +23,12 @@ class SecureSettings(context: Context) {
         // Fallback: still private to this app
         context.getSharedPreferences("jarvis_private", Context.MODE_PRIVATE)
     }
+
     var userName: String
         get() = prefs.getString("user_name", "") ?: ""
         set(v) = prefs.edit().putString("user_name", v.trim()).apply()
-            var inworldKey: String
+
+    var inworldKey: String
         get() = prefs.getString("inworld_key", "") ?: ""
         set(v) = prefs.edit().putString("inworld_key", v.trim()).apply()
 
@@ -35,16 +37,18 @@ class SecureSettings(context: Context) {
         set(v) = prefs.edit().putString("inworld_voice", v.trim()).apply()
 
     var inworldModel: String
-        get() = prefs.getString("inworld_model", "inworld-tts-1.5-max") ?: "inworld-tts-1.5-max"
+        get() = prefs.getString("inworld_model", "inworld-tts-2") ?: "inworld-tts-2"
         set(v) = prefs.edit().putString("inworld_model", v.trim()).apply()
-    var apiKey: String
-        var picoKey: String
+
+    var picoKey: String
         get() = prefs.getString("pico_key", "") ?: ""
         set(v) = prefs.edit().putString("pico_key", v.trim()).apply()
 
     var wakeEnabled: Boolean
         get() = prefs.getBoolean("wake_on", false)
         set(v) = prefs.edit().putBoolean("wake_on", v).apply()
+
+    var apiKey: String
         get() = prefs.getString("api_key", "") ?: ""
         set(v) = prefs.edit().putString("api_key", v.trim()).apply()
 

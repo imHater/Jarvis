@@ -5,10 +5,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Bundle
 import android.provider.ContactsContract
+import android.telecom.TelecomManager
 import androidx.core.content.ContextCompat
 
-/** Calls and SMS drafts. Used only after you say yes, and only with permissions you give. */
+/** Calls and SMS drafts. Uses only permissions you give. */
 class PhoneActions(private val context: Context) {
 
     private data class Contact(val name: String, val number: String)
@@ -17,7 +19,7 @@ class PhoneActions(private val context: Context) {
     fun has(permission: String): Boolean =
         ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
 
-    /** If the AI reply is a call/SMS request, returns a yes/no question. Otherwise null. */
+    /** If the AI reply is a call/SMS request, returns the action to run. Otherwise null. */
     fun fromAiText(raw: String): CommandResult.Confirm? {
         val m = TAG.find(raw) ?: return null
         val parts = m.groupValues[1].split("|").map { it.trim() }
@@ -36,9 +38,11 @@ class PhoneActions(private val context: Context) {
     }
 
     fun callConfirm(who: String): CommandResult.Confirm {
+        val byName = !isNumber(who)
         val perms = mutableListOf(Manifest.permission.CALL_PHONE)
-        if (!isNumber(who)) perms.add(Manifest.permission.READ_CONTACTS)
-        return CommandResult.Confirm("Call $who? Say yes or tap Yes.", perms) {
+        if (byName) perms.add(Manifest.permission.READ_CONTACTS)
+        // A saved contact (by name) is called right away. A spoken/typed number still asks first.
+        return CommandResult.Confirm("Call $who? Say yes or tap Yes.", perms, auto = byName) {
             val r = resolve(who)
             if (r.error != null) r.error else placeCall(r.number ?: "", r.label)
         }
@@ -110,15 +114,25 @@ class PhoneActions(private val context: Context) {
     }
 
     private fun placeCall(number: String, label: String): String {
+        val digits = number.filter { it.isDigit() }
+        if (digits in EMERGENCY) {
+            return "I don't dial emergency numbers by myself. Please dial it yourself."
+        }
         return try {
-            val i = Intent(Intent.ACTION_CALL, Uri.fromParts("tel", number, null))
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(i)
+            val tm = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+            tm.placeCall(Uri.fromParts("tel", number, null), Bundle())
             "Calling $label."
         } catch (e: SecurityException) {
             "Call permission is missing."
         } catch (e: Exception) {
-            "I couldn't place the call."
+            try {
+                val i = Intent(Intent.ACTION_CALL, Uri.fromParts("tel", number, null))
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(i)
+                "Calling $label."
+            } catch (e2: Exception) {
+                "I couldn't place the call."
+            }
         }
     }
 
@@ -138,5 +152,6 @@ class PhoneActions(private val context: Context) {
 
     private companion object {
         val TAG = Regex("\\[\\[(.+?)\\]\\]", RegexOption.DOT_MATCHES_ALL)
+        val EMERGENCY = setOf("100", "101", "102", "108", "112", "1091", "1098", "911", "999")
     }
 }

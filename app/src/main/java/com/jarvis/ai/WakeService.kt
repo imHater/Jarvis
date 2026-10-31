@@ -1,8 +1,5 @@
 package com.jarvis.ai
 
-import ai.picovoice.porcupine.Porcupine
-import ai.picovoice.porcupine.PorcupineManager
-import ai.picovoice.porcupine.PorcupineManagerCallback
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -39,7 +36,7 @@ object PendingCommand {
 }
 
 /**
- * Listens for the wake word "Jarvis" (on the phone, with Picovoice), then listens to one
+ * Listens for the wake word "Jarvis" (on the phone, with open-source Vosk), then listens to one
  * request, answers by voice, and goes back to waiting.
  */
 class WakeService : Service() {
@@ -54,7 +51,7 @@ class WakeService : Service() {
     private lateinit var phone: PhoneActions
     private lateinit var voice: VoiceManager
 
-    private var porcupine: PorcupineManager? = null
+    private var vosk: VoskWake? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wakeListening = false
     private var busy = false
@@ -88,18 +85,14 @@ class WakeService : Service() {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         )
         acquireWakeLock()
-        startPorcupine()
+        startWake()
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
         instance = null
-        try {
-            porcupine?.stop()
-            porcupine?.delete()
-        } catch (e: Exception) {
-        }
-        porcupine = null
+        try { vosk?.release() } catch (e: Exception) { }
+        vosk = null
         try { voice.shutdown() } catch (e: Exception) { }
         scope.cancel()
         try {
@@ -111,34 +104,27 @@ class WakeService : Service() {
 
     // ---------- Wake word ----------
 
-    private fun startPorcupine() {
+    private fun startWake() {
         if (wakeListening) return
         if (appOpen) {
             updateStatus("Paused while the app is open")
             return
         }
-        val key = settings.picoKey
-        if (key.isBlank()) {
-            failed("Add your Picovoice AccessKey in Settings.")
-            return
+        if (vosk == null) {
+            vosk = VoskWake(
+                this,
+                onStatus = { updateStatus(it) },
+                onWakeWord = { onWake() },
+                onFailed = { failed(it) }
+            )
         }
-        try {
-            if (porcupine == null) {
-                porcupine = PorcupineManager.Builder()
-                    .setAccessKey(key)
-                    .setKeyword(Porcupine.BuiltInKeyword.JARVIS)
-                    .build(applicationContext, PorcupineManagerCallback { main.post { onWake() } })
-            }
-            porcupine?.start()
-            wakeListening = true
-            updateStatus("Listening for \"Jarvis\"")
-        } catch (e: Exception) {
-            failed("Wake word could not start: ${e.message}")
-        }
+        wakeListening = true
+        updateStatus("Starting...")
+        vosk?.start()
     }
 
     private fun pauseWake() {
-        try { porcupine?.stop() } catch (e: Exception) { }
+        try { vosk?.pause() } catch (e: Exception) { }
         wakeListening = false
         updateStatus("Paused while the app is open")
     }
@@ -147,7 +133,7 @@ class WakeService : Service() {
         main.post {
             appOpen = v
             if (!busy) {
-                if (v) pauseWake() else startPorcupine()
+                if (v) pauseWake() else startWake()
             }
         }
     }
@@ -156,11 +142,11 @@ class WakeService : Service() {
         if (busy || appOpen) return
         busy = true
         val my = ++session
-        try { porcupine?.stop() } catch (e: Exception) { }
+        try { vosk?.pause() } catch (e: Exception) { }
         wakeListening = false
         updateStatus("Listening to you...")
         beep()
-        main.postDelayed({ if (busy && session == my) listenNow() }, 400)
+        main.postDelayed({ if (busy && session == my) listenNow() }, 500)
         // Safety: never stay stuck.
         main.postDelayed({
             if (busy && session == my) {
@@ -185,7 +171,7 @@ class WakeService : Service() {
         if (!busy) return
         session++
         busy = false
-        main.postDelayed({ if (!busy) startPorcupine() }, 400)
+        main.postDelayed({ if (!busy) startWake() }, 500)
     }
 
     // ---------- Handling the request ----------

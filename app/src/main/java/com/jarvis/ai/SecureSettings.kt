@@ -38,6 +38,13 @@ class SecureSettings(context: Context) {
         get() = prefs.getString("inworld_model", "inworld-tts-1.5-max") ?: "inworld-tts-1.5-max"
         set(v) = prefs.edit().putString("inworld_model", v.trim()).apply()
     var apiKey: String
+        var picoKey: String
+        get() = prefs.getString("pico_key", "") ?: ""
+        set(v) = prefs.edit().putString("pico_key", v.trim()).apply()
+
+    var wakeEnabled: Boolean
+        get() = prefs.getBoolean("wake_on", false)
+        set(v) = prefs.edit().putBoolean("wake_on", v).apply()
         get() = prefs.getString("api_key", "") ?: ""
         set(v) = prefs.edit().putString("api_key", v.trim()).apply()
 

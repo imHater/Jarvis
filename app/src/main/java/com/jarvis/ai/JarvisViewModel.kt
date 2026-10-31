@@ -163,7 +163,11 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         state = JarvisState.IDLE
         if (conversationActive) listenNow()
     }
-
+    /** Runs a command the wake service could not do in the background. */
+    fun runPendingCommand() {
+        val cmd = PendingCommand.take() ?: return
+        submit(cmd)
+    }
     /** Clears the on-screen conversation (saved history is kept). */
     fun newChat() {
         stopAll()

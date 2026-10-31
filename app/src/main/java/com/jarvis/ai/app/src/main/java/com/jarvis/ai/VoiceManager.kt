@@ -3,6 +3,7 @@ package com.jarvis.ai
 import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
+import android.media.AudioManager
 import android.media.MediaPlayer
 import android.os.Bundle
 import android.os.Handler
@@ -33,11 +34,14 @@ class VoiceManager(
 ) {
     private val main = Handler(Looper.getMainLooper())
     private val settings = SecureSettings(context)
+    private val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var recognizer: SpeechRecognizer? = null
     private var player: MediaPlayer? = null
     private var speakToken = 0
+    private var listenToken = 0
+    private val mutedStreams = mutableListOf<Int>()
 
     var speechRate: Float = 1.0f
 
@@ -48,6 +52,40 @@ class VoiceManager(
     }
 
     fun canListen(): Boolean = SpeechRecognizer.isRecognitionAvailable(context)
+
+    // ---------- Silence the "listening" beeps ----------
+
+    private fun muteBeeps() {
+        if (mutedStreams.isNotEmpty()) return
+        val streams = intArrayOf(
+            AudioManager.STREAM_MUSIC,
+            AudioManager.STREAM_NOTIFICATION,
+            AudioManager.STREAM_SYSTEM
+        )
+        for (s in streams) {
+            try {
+                if (!audio.isStreamMute(s)) {
+                    audio.adjustStreamVolume(s, AudioManager.ADJUST_MUTE, 0)
+                    mutedStreams.add(s)
+                }
+            } catch (e: Exception) {
+                // Some phones don't allow muting every stream. That's fine.
+            }
+        }
+    }
+
+    private fun unmuteBeeps() {
+        listenToken++
+        for (s in mutedStreams) {
+            try {
+                audio.adjustStreamVolume(s, AudioManager.ADJUST_UNMUTE, 0)
+            } catch (e: Exception) {
+            }
+        }
+        mutedStreams.clear()
+    }
+
+    // ---------- Speaking ----------
 
     /** Returns false if nothing could be spoken. */
     fun speak(text: String): Boolean {
@@ -64,15 +102,13 @@ class VoiceManager(
         return speakDevice(spoken)
     }
 
-    // ---------- Inworld (cloned voice) ----------
-
     private fun speakInworld(text: String, key: String, voiceId: String) {
         val token = ++speakToken
         val model = settings.inworldModel.ifBlank { "inworld-tts-2" }
         val hasHindi = text.any { it in '\u0900'..'\u097F' }
 
         Thread {
-            var audio: ByteArray? = null
+            var audioBytes: ByteArray? = null
             var error: String? = null
             try {
                 val conn = URL("https://api.inworld.ai/tts/v1/voice").openConnection() as HttpURLConnection
@@ -100,7 +136,7 @@ class VoiceManager(
                         b64 = obj.optJSONObject("result")?.optString("audioContent") ?: ""
                     }
                     if (b64.isBlank()) error = "Inworld sent no audio."
-                    else audio = Base64.decode(b64, Base64.DEFAULT)
+                    else audioBytes = Base64.decode(b64, Base64.DEFAULT)
                 } else {
                     val detail = try {
                         conn.errorStream?.bufferedReader()?.use { it.readText() }?.take(160) ?: ""
@@ -116,19 +152,19 @@ class VoiceManager(
             } catch (e: Exception) {
                 error = "Inworld voice failed: ${e.message}"
             }
-            main.post { onInworldResult(token, text, audio, error) }
+            main.post { onInworldResult(token, text, audioBytes, error) }
         }.start()
     }
 
-    private fun onInworldResult(token: Int, text: String, audio: ByteArray?, error: String?) {
+    private fun onInworldResult(token: Int, text: String, audioBytes: ByteArray?, error: String?) {
         if (token != speakToken) return // cancelled meanwhile
-        if (audio == null) {
+        if (audioBytes == null) {
             fallbackToDevice(text, error ?: "Inworld voice failed.")
             return
         }
         try {
             val f = File(context.cacheDir, "kabir_voice.mp3")
-            f.writeBytes(audio)
+            f.writeBytes(audioBytes)
             val mp = MediaPlayer()
             player = mp
             mp.setAudioAttributes(
@@ -160,8 +196,6 @@ class VoiceManager(
         onNotice("$reason Using the phone voice instead.")
         if (!speakDevice(text)) onSpeakingDone()
     }
-
-    // ---------- Phone voice ----------
 
     private fun speakDevice(spoken: String): Boolean {
         val engine = tts
@@ -239,6 +273,7 @@ class VoiceManager(
 
             override fun onError(error: Int) {
                 onLevel(0f)
+                unmuteBeeps()
                 val quiet = error == SpeechRecognizer.ERROR_NO_MATCH ||
                     error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
                 onFail(messageFor(error), quiet)
@@ -246,6 +281,7 @@ class VoiceManager(
 
             override fun onResults(results: Bundle?) {
                 onLevel(0f)
+                unmuteBeeps()
                 val text = results
                     ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull()
@@ -261,12 +297,19 @@ class VoiceManager(
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L)
         }
+
+        // Mute the system "listening" beeps; they come back as soon as we have a result.
+        muteBeeps()
+        val my = ++listenToken
+        main.postDelayed({ if (listenToken == my) unmuteBeeps() }, 20000)
+
         r.startListening(intent)
     }
 
     fun stopListening() {
         recognizer?.destroy()
         recognizer = null
+        unmuteBeeps()
         onLevel(0f)
     }
 

@@ -29,9 +29,11 @@ class VoskWake(
     private var model: Model? = null
     private var recognizer: Recognizer? = null
     private var service: SpeechService? = null
+    private var ready = false
     private var wanted = false
     private var loading = false
     private var triggered = false
+    private var loadToken = 0
 
     private val listener = object : RecognitionListener {
         override fun onPartialResult(hypothesis: String?) { heard(hypothesis) }
@@ -63,35 +65,60 @@ class VoskWake(
     fun start() {
         wanted = true
         if (service != null) return
-        if (model != null) {
-            begin()
+        if (ready) {
+            beginListening()
             return
         }
         if (loading) return
         loading = true
-        Thread {
-            val dir = File(context.filesDir, "vosk")
-            val modelDir = File(dir, MODEL_NAME)
-            val marker = File(dir, ".ok_$MODEL_NAME")
-            var err: String? = null
-            if (!marker.exists()) {
-                err = downloadModel(dir, marker)
+        val my = ++loadToken
+
+        // If loading takes too long, tell the user instead of staying stuck.
+        main.postDelayed({
+            if (loading && my == loadToken) {
+                loading = false
+                onFailed("The voice model is taking too long. Turn the wake word off and on again.")
             }
-            var loaded: Model? = null
-            if (err == null) {
-                try {
-                    main.post { onStatus("Loading voice model...") }
-                    loaded = Model(modelDir.absolutePath)
-                } catch (e: Exception) {
-                    marker.delete() // download again next time
-                    err = "Could not load the voice model: ${e.message}"
+        }, 150000)
+
+        Thread {
+            var err: String? = null
+            var loadedModel: Model? = null
+            var loadedRec: Recognizer? = null
+            try {
+                val dir = File(context.filesDir, "vosk")
+                val modelDir = File(dir, MODEL_NAME)
+                val marker = File(dir, ".ok_$MODEL_NAME")
+
+                if (!marker.exists()) {
+                    modelDir.deleteRecursively()
+                    err = downloadModel(dir, marker)
                 }
+                if (err == null) {
+                    post("Loading voice model...")
+                    val m: Model = try {
+                        Model(modelDir.absolutePath)
+                    } catch (t: Throwable) {
+                        // Broken or incomplete files: remove them so the next start downloads again.
+                        marker.delete()
+                        modelDir.deleteRecursively()
+                        throw t
+                    }
+                    loadedModel = m
+                    post("Preparing wake word...")
+                    loadedRec = Recognizer(m, 16000.0f)
+                }
+            } catch (t: Throwable) {
+                err = "Wake word setup failed: ${t.javaClass.simpleName}: ${t.message}"
             }
             main.post {
+                if (my != loadToken) return@post
                 loading = false
-                if (loaded != null) {
-                    model = loaded
-                    if (wanted) begin()
+                if (err == null && loadedModel != null && loadedRec != null) {
+                    model = loadedModel
+                    recognizer = loadedRec
+                    ready = true
+                    if (wanted) beginListening()
                 } else {
                     onFailed(err ?: "Voice model failed.")
                 }
@@ -99,18 +126,21 @@ class VoskWake(
         }.start()
     }
 
-    private fun begin() {
-        val m = model ?: return
+    private fun post(text: String) {
+        main.post { onStatus(text) }
+    }
+
+    private fun beginListening() {
+        val r = recognizer ?: return
         try {
-            val r = recognizer ?: Recognizer(m, 16000.0f, GRAMMAR).also { recognizer = it }
             triggered = false
             val s = SpeechService(r, 16000.0f)
             service = s
             s.startListening(listener)
             onStatus("Listening for \"Jarvis\"")
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
             service = null
-            onFailed("Wake word could not start: ${e.message}")
+            onFailed("Wake word could not start: ${t.javaClass.simpleName}: ${t.message}")
         }
     }
 
@@ -120,17 +150,20 @@ class VoskWake(
         val s = service
         service = null
         if (s != null) {
-            try { s.stop() } catch (e: Exception) { }
-            try { s.shutdown() } catch (e: Exception) { }
+            try { s.stop() } catch (t: Throwable) { }
+            try { s.shutdown() } catch (t: Throwable) { }
         }
     }
 
     fun release() {
+        loadToken++ // cancels any loading in progress
+        loading = false
         pause()
-        try { (recognizer as? java.io.Closeable)?.close() } catch (e: Exception) { }
+        try { (recognizer as? java.io.Closeable)?.close() } catch (t: Throwable) { }
         recognizer = null
-        try { (model as? java.io.Closeable)?.close() } catch (e: Exception) { }
+        try { (model as? java.io.Closeable)?.close() } catch (t: Throwable) { }
         model = null
+        ready = false
     }
 
     private fun downloadModel(dir: File, marker: File): String? {
@@ -157,14 +190,14 @@ class VoskWake(
                             val pct = (done * 100 / total).toInt()
                             if (pct != lastPct && pct % 5 == 0) {
                                 lastPct = pct
-                                main.post { onStatus("Downloading voice model $pct%") }
+                                post("Downloading voice model $pct%")
                             }
                         }
                         n = input.read(buf)
                     }
                 }
             }
-            main.post { onStatus("Unpacking voice model...") }
+            post("Unpacking voice model...")
             unzip(zip, dir)
             zip.delete()
             if (!File(dir, MODEL_NAME).exists()) {
@@ -172,8 +205,8 @@ class VoskWake(
             }
             marker.writeText("ok")
             null
-        } catch (e: Exception) {
-            "Voice model download failed: ${e.message}"
+        } catch (t: Throwable) {
+            "Voice model download failed: ${t.message}"
         }
     }
 
@@ -201,7 +234,6 @@ class VoskWake(
     companion object {
         private const val MODEL_NAME = "vosk-model-small-en-us-0.15"
         private const val MODEL_URL = "https://alphacephei.com/vosk/models/$MODEL_NAME.zip"
-        private const val GRAMMAR = "[\"jarvis\", \"jar vis\", \"[unk]\"]"
-        private val WAKE_WORDS = listOf("jarvis", "jar vis")
+        private val WAKE_WORDS = listOf("jarvis", "jar vis", "jarvish", "jarvas")
     }
 }

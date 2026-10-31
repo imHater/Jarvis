@@ -10,10 +10,12 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.net.Uri
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -57,6 +59,10 @@ class WakeService : Service() {
     private var busy = false
     private var appOpen = false
     private var session = 0
+
+    // A yes/no question we asked by voice (alarms, notes...).
+    private var pendingConfirm: CommandResult.Confirm? = null
+    private var pendingOriginal: String = ""
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -141,6 +147,7 @@ class WakeService : Service() {
     private fun onWake() {
         if (busy || appOpen) return
         busy = true
+        pendingConfirm = null
         val my = ++session
         try { vosk?.pause() } catch (e: Exception) { }
         wakeListening = false
@@ -150,6 +157,7 @@ class WakeService : Service() {
         // Safety: never stay stuck.
         main.postDelayed({
             if (busy && session == my) {
+                pendingConfirm = null
                 voice.stopListening()
                 voice.stopSpeaking()
                 resume()
@@ -158,17 +166,26 @@ class WakeService : Service() {
     }
 
     private fun listenNow() {
+        updateStatus("Listening to you...")
         val lang = getSharedPreferences("jarvis_ui", 0).getString("lang", "en-IN") ?: "en-IN"
         voice.startListening(
             lang,
             onPartial = { },
             onText = { handle(it) },
-            onFail = { _, _ -> resume() }
+            onFail = { _, _ ->
+                pendingConfirm = null
+                resume()
+            }
         )
     }
 
     private fun resume() {
         if (!busy) return
+        // Waiting for a yes/no: listen again instead of going back to sleep.
+        if (pendingConfirm != null) {
+            main.postDelayed({ if (busy && pendingConfirm != null) listenNow() }, 300)
+            return
+        }
         session++
         busy = false
         main.postDelayed({ if (!busy) startWake() }, 500)
@@ -177,16 +194,41 @@ class WakeService : Service() {
     // ---------- Handling the request ----------
 
     private fun handle(text: String) {
-        val t = text.lowercase()
-        if (NEEDS_APP.containsMatchIn(t)) {
+        val t = text.lowercase().trim().trimEnd('.', '!', '?')
+
+        // An answer to a yes/no question from the last turn
+        val c = pendingConfirm
+        if (c != null) {
+            pendingConfirm = null
+            when {
+                t in YES_WORDS -> runAuto(c, pendingOriginal)
+                t in NO_WORDS -> say("Okay, cancelled.")
+                else -> say("I did not hear a clear yes, so I cancelled.")
+            }
+            return
+        }
+
+        val canLaunch = Settings.canDrawOverlays(this)
+        if (!canLaunch && NEEDS_APP.containsMatchIn(t)) {
             handoff(text)
             return
         }
         when (val r = router.handle(text)) {
             is CommandResult.Reply -> say(r.text)
-            is CommandResult.Confirm -> handoff(text)
+            is CommandResult.Confirm -> if (r.auto) runAuto(r, text) else ask(r, text)
             CommandResult.NotACommand -> askAi(text)
         }
+    }
+
+    private fun ask(c: CommandResult.Confirm, original: String) {
+        pendingConfirm = c
+        pendingOriginal = original
+        say(c.prompt)
+    }
+
+    /** Runs the action now. If a permission is missing, hand over to the app. */
+    private fun runAuto(c: CommandResult.Confirm, original: String) {
+        if (c.permissions.all { phone.has(it) }) say(c.onYes()) else handoff(original)
     }
 
     private fun askAi(text: String) {
@@ -194,7 +236,13 @@ class WakeService : Service() {
         scope.launch {
             when (val r = ai.ask(listOf(ChatMessage(text, true)), memory.getAll())) {
                 is AiResult.Success -> {
-                    if (phone.fromAiText(r.text) != null) handoff(text) else say(r.text)
+                    val c = phone.fromAiText(r.text)
+                    when {
+                        c == null -> say(r.text)
+                        Settings.canDrawOverlays(this@WakeService) ->
+                            if (c.auto) runAuto(c, text) else ask(c, text)
+                        else -> handoff(text)
+                    }
                 }
                 is AiResult.Failure -> say("Sorry, I could not get an answer right now.")
             }
@@ -206,7 +254,10 @@ class WakeService : Service() {
         if (!voice.speak(text)) resume()
     }
 
-    /** Android won't let a background service open apps. So we put a button in the notification. */
+    /**
+     * Without the "Display over other apps" permission, Android won't let a background service
+     * open apps. So we put a button in the notification, plus a shortcut to allow it.
+     */
     private fun handoff(text: String) {
         PendingCommand.text = text
         val open = PendingIntent.getActivity(
@@ -215,16 +266,23 @@ class WakeService : Service() {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val overlay = PendingIntent.getActivity(
+            this, 3,
+            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
         val n = NotificationCompat.Builder(this, CH_INFO)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentTitle("Kabir needs the app for this")
             .setContentText("Tap to run: $text")
             .setContentIntent(open)
+            .addAction(0, "Allow auto-open", overlay)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         getSystemService(NotificationManager::class.java).notify(NOTIF_ID_HANDOFF, n)
-        say("Android needs the app screen for that. I put a button in your notifications. Please tap it.")
+        say("Please tap the notification to run that.")
     }
 
     // ---------- Helpers ----------
@@ -305,11 +363,20 @@ class WakeService : Service() {
         private const val NOTIF_ID_HANDOFF = 13
         const val ACTION_STOP = "com.jarvis.ai.STOP_WAKE"
 
-        // Things Android only lets us do with the app on screen.
+        // Things Android only lets us do with the app on screen (unless auto-open is allowed).
         private val NEEDS_APP = Regex(
             "\\b(open|launch|kholo|khol|call|dial|sms|youtube|yt|google|search|dhundo|navigate|" +
                 "rasta|map|maps|wifi|wi-fi|hotspot|bluetooth|alarm|timer|reminder|screenshot|" +
                 "settings|brightness|airplane)\\b"
+        )
+
+        private val YES_WORDS = setOf(
+            "yes", "yeah", "yep", "ok", "okay", "sure", "haan", "han", "ha", "haa",
+            "kar do", "theek hai", "thik hai", "हाँ", "हां", "हा", "जी", "ठीक है", "कर दो"
+        )
+        private val NO_WORDS = setOf(
+            "no", "nope", "nahi", "nahin", "na", "cancel", "mat karo", "ruko", "stop",
+            "नहीं", "ना", "रुको", "मत करो"
         )
 
         @Volatile private var instance: WakeService? = null

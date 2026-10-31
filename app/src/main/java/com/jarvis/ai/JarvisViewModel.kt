@@ -45,7 +45,7 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
     var heardText by mutableStateOf("")
         private set
 
-    /** Permissions the screen should ask for (after you said yes to a call/SMS). */
+    /** Permissions the screen should ask for (after a call/SMS was accepted). */
     var permissionRequest by mutableStateOf<List<String>>(emptyList())
         private set
 
@@ -81,12 +81,15 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
 
         when (val r = router.handle(text)) {
             is CommandResult.Reply -> reply(r.text)
-            is CommandResult.Confirm -> {
-                pendingConfirm = r
-                reply(r.prompt)
-            }
+            is CommandResult.Confirm -> offer(r)
             CommandResult.NotACommand -> askAi()
         }
+    }
+
+    /** Asks yes/no, or just does it when the action is marked automatic (calls to contacts). */
+    private fun offer(c: CommandResult.Confirm) {
+        pendingConfirm = c
+        if (c.auto) resolveConfirm(true) else reply(c.prompt)
     }
 
     fun resolveConfirm(yes: Boolean) {
@@ -119,6 +122,12 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Runs a command the wake service could not do in the background. */
+    fun runPendingCommand() {
+        val cmd = PendingCommand.take() ?: return
+        submit(cmd)
+    }
+
     private fun runConfirmed(action: () -> String) {
         val out = action()
         memories = memoryStore.getAll()
@@ -132,12 +141,7 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
             when (val result = ai.ask(history, memoryStore.getAll())) {
                 is AiResult.Success -> {
                     val c = phone.fromAiText(result.text)
-                    if (c != null) {
-                        pendingConfirm = c
-                        reply(c.prompt)
-                    } else {
-                        reply(result.text)
-                    }
+                    if (c != null) offer(c) else reply(result.text)
                 }
                 is AiResult.Failure -> {
                     conversationActive = false
@@ -163,11 +167,7 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         state = JarvisState.IDLE
         if (conversationActive) listenNow()
     }
-    /** Runs a command the wake service could not do in the background. */
-    fun runPendingCommand() {
-        val cmd = PendingCommand.take() ?: return
-        submit(cmd)
-    }
+
     /** Clears the on-screen conversation (saved history is kept). */
     fun newChat() {
         stopAll()

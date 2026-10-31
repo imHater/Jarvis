@@ -15,6 +15,13 @@ class JarvisApplication : Application() {
             override fun onActivityStarted(activity: Activity) {
                 started++
                 WakeService.appVisible(true)
+                // After an update or restart, bring the wake word back if it was ON.
+                try {
+                    if (SecureSettings(this@JarvisApplication).wakeEnabled) {
+                        WakeService.setEnabled(this@JarvisApplication, true)
+                    }
+                } catch (e: Exception) {
+                }
                 if (activity is ComponentActivity) {
                     try {
                         ViewModelProvider(activity)[JarvisViewModel::class.java].runPendingCommand()
